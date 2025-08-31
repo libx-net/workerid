@@ -66,15 +66,15 @@ func main() {
 	ticker := time.NewTicker(time.Second * 90)
     go func() {
         select {
-            case <- ctx.Done():
-                fmt.Println("main process exit")
+        case <- ctx.Done():
+            fmt.Println("main process exit")
+            ticker.Stop()
+        case <-ticker.C:
+            if err := generator.Renew(workerID, token); err != nil {
+                log.Fatal(err)
                 ticker.Stop()
-            case <-ticker.C:
-                if err := generator.Renew(workerID, token); err != nil {
-                    log.Fatal(err)
-                    ticker.Stop()
-                    return
-                }
+                return
+            }
         }
     }
 }
@@ -98,7 +98,7 @@ type Generator interface {
 基于Redis的分布式worker ID分配器。
 
 ```go
-func NewRedisGenerator(client *redis.Client, cluster string, opts ...Option) *RedisGenerator
+func NewRedisGenerator(client *redis.Client, cluster string, opts ...Option) (*RedisGenerator, error)
 ```
 
 ### MemoryGenerator
@@ -107,6 +107,32 @@ func NewRedisGenerator(client *redis.Client, cluster string, opts ...Option) *Re
 
 ```go
 func NewMemoryGenerator(opts ...Option) *MemoryGenerator
+```
+
+## 实现细节
+
+- **Token格式**: 22字符的base64 URL编码随机字符串
+- **Redis实现**: 使用Lua脚本保证原子操作，使用Redis有序集合管理ID
+- **内存实现**: 使用互斥锁保证线程安全
+
+## 示例
+
+查看 `examples/` 目录获取完整的使用示例：
+
+- `redis/`: 基于Redis的worker ID管理，包含续约和优雅退出
+- `memory/`: 基于内存的使用示例，包含错误处理和测试场景
+
+运行示例：
+```bash
+# Redis示例
+cd examples/redis
+go mod tidy
+go run main.go
+
+# 内存示例
+cd examples/memory  
+go mod tidy
+go run main.go
 ```
 
 ## 性能考虑
