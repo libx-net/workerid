@@ -1,109 +1,54 @@
 package workerid
 
 import (
-	"sync"
-	"time"
+	"math/rand/v2"
 )
 
-type workerToken struct {
-	token     string
-	leaseTime int64
-}
+// MemoryGenerator 单机环境下的简化实现
 type MemoryGenerator struct {
-	maxWorkerID  uint32
-	leaseSeconds int64
-	mu           sync.Mutex
-	availableIDs map[int64]int64
-	tokens       map[int64]workerToken
+	workerID int64
+	token    string
 }
 
 func NewMemoryGenerator(options ...Option) *MemoryGenerator {
 	opts := &generatorOptions{
-		maxWorkerID:  1000,
-		maxLeaseTime: 5 * time.Minute,
+		maxWorkerID: 1000,
 	}
-	for _, o := range options {
-		o(opts)
+	for _, option := range options {
+		option(opts)
 	}
-	if opts.maxLeaseTime <= 0 {
-		opts.maxLeaseTime = 5 * time.Minute
+	maxId := opts.maxWorkerID
+	if maxId == 0 {
+		maxId = 32
 	}
-	if opts.maxWorkerID <= 0 {
-		opts.maxWorkerID = 1000
-	}
-	availableIDs := make(map[int64]int64, int(opts.maxWorkerID))
-	for i := 1; i <= int(opts.maxWorkerID); i++ {
-		availableIDs[int64(i)] = 0
-	}
+	randomUint32 := uint32(rand.N(uint64(maxId-1))) + 1
 
 	return &MemoryGenerator{
-		maxWorkerID:  opts.maxWorkerID,
-		leaseSeconds: int64(opts.maxLeaseTime.Seconds()),
-		availableIDs: availableIDs,
-		mu:           sync.Mutex{},
+		workerID: int64(randomUint32),
+		token:    generateToken(),
 	}
 }
 
 func (g *MemoryGenerator) GetID() (int64, string, error) {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	var workerID int64
-	now := time.Now().Unix()
-	newExpiresAt := now + g.leaseSeconds
-	for id, expireAt := range g.availableIDs {
-		if expireAt < now {
-			workerID = id
-			g.availableIDs[workerID] = newExpiresAt
-			break
-		}
-	}
-
-	token := generateToken()
-
-	g.tokens[workerID] = workerToken{
-		token:     token,
-		leaseTime: newExpiresAt,
-	}
-
-	return workerID, token, nil
+	return g.workerID, g.token, nil
 }
 
 func (g *MemoryGenerator) Renew(workerID int64, token string) error {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	if _, ok := g.tokens[workerID]; !ok {
-		return ErrNotAssigned
+	if workerID != g.workerID {
+		return ErrInvalidWorkerID
 	}
-	if g.tokens[workerID].token != token {
+	if token != g.token {
 		return ErrTokenMismatch
 	}
-	now := time.Now().Unix()
-	if g.tokens[workerID].leaseTime < now {
-		return ErrTokenExpired
-	}
-	newExpireAt := now + g.leaseSeconds
-	g.tokens[workerID] = workerToken{
-		token:     token,
-		leaseTime: newExpireAt,
-	}
-	g.availableIDs[workerID] = newExpireAt
-	return nil
+	return nil // 单机环境无需续期
 }
 
 func (g *MemoryGenerator) Release(workerID int64, token string) error {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	if _, ok := g.tokens[workerID]; !ok {
-		return ErrNotAssigned
+	if workerID != g.workerID {
+		return ErrInvalidWorkerID
 	}
-	if g.tokens[workerID].token != token {
+	if token != g.token {
 		return ErrTokenMismatch
 	}
-	now := time.Now().Unix()
-	if g.tokens[workerID].leaseTime < now {
-		return ErrTokenExpired
-	}
-	delete(g.tokens, workerID)
-	g.availableIDs[workerID] = 0
-	return nil
+	return nil // 单机环境无需释放
 }
