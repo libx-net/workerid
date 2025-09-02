@@ -68,9 +68,8 @@ func (g *RedisGenerator) getCurrentTime() (int64, error) {
 			return 0, err
 		}
 		return t.Unix(), nil
-	} else {
-		return time.Now().Unix(), nil
 	}
+	return time.Now().Unix(), nil
 }
 
 func (g *RedisGenerator) initAvailableIDs() error {
@@ -100,6 +99,7 @@ func (g *RedisGenerator) getTokenKey() string {
 	return fmt.Sprintf("{workerid:cluster:%s}:tokens", g.cluster)
 }
 
+/*
 // acquireLock 获取分布式锁（SETNX + EXPIRE）
 func (g *RedisGenerator) acquireLock() (bool, error) {
 	// 使用 SET key value NX PX timeout 保证原子性
@@ -110,58 +110,59 @@ func (g *RedisGenerator) acquireLock() (bool, error) {
 	return result, nil
 }
 
+var releaseScript = redis.NewScript(`
+	if redis.call('GET', KEYS[1]) == ARGV[1] then
+		return redis.call('DEL', KEYS[1])
+	else
+		return 0
+	end
+`)
+
 // releaseLock 释放分布式锁（Lua 脚本保证原子性）
 func (g *RedisGenerator) releaseLock() error {
 	// 使用 Lua 脚本避免误删其他客户端的锁
-	script := `
-		if redis.call('GET', KEYS[1]) == ARGV[1] then
-			return redis.call('DEL', KEYS[1])
-		else
-			return 0
-		end
-	`
-	_, err := g.redisClient.Eval(g.ctx, script, []string{g.lockKey}, g.lockVal).Result()
+	_, err := releaseScript.Run(g.ctx, g.redisClient, []string{g.lockKey}, g.lockVal).Result()
 	return err
 }
+*/
+
+var getIDScript = redis.NewScript(`
+	local key = KEYS[1]
+	local now = tonumber(ARGV[1])
+	local lease = tonumber(ARGV[2])
+
+	-- 查找最小可用 ID
+	local ids = redis.call('ZRANGEBYSCORE', key, '-inf', now, 'WITHSCORES', 'LIMIT', 0, 1)
+	if #ids == 0 then return nil end
+
+	local workerID = ids[1]
+	local newExpire = now + lease
+
+	-- 更新 ID 状态
+	redis.call('ZADD', key, newExpire, workerID)
+
+	-- 生成并存储 Token
+	local tokenKey = KEYS[2]
+	local token = ARGV[3]
+	local tokenData = token .. ':' .. newExpire
+	redis.call('HSET', tokenKey, 'token', workerID, tokenData)
+	redis.call('EXPIRE', tokenKey, lease * 2)  -- 设置 Token 过期时间
+
+	return {workerID, token}	
+`)
 
 func (g *RedisGenerator) GetID() (int64, string, error) {
-	script := `
-        local key = KEYS[1]
-        local now = tonumber(ARGV[1])
-        local lease = tonumber(ARGV[2])
-
-        -- 查找最小可用 ID
-        local ids = redis.call('ZRANGEBYSCORE', key, '-inf', now, 'WITHSCORES', 'LIMIT', 0, 1)
-        if #ids == 0 then return nil end
-
-        local workerID = ids[1]
-        local newExpire = now + lease
-
-        -- 更新 ID 状态
-        redis.call('ZADD', key, newExpire, workerID)
-
-        -- 生成并存储 Token
-        local tokenKey = KEYS[2]
-        local token = ARGV[3]
-		local tokenData = token .. ':' .. newExpire
-        redis.call('HSET', tokenKey, 'token', workerID, tokenData)
-        redis.call('EXPIRE', tokenKey, lease * 2)  -- 设置 Token 过期时间
-
-        return {workerID, token}	
-	`
 	token := generateToken()
 	now, err := g.getCurrentTime()
 	if err != nil {
 		return 0, "", fmt.Errorf("get current time failed: %w", err)
 	}
-	result, err := g.redisClient.Eval(g.ctx, script,
-		[]string{g.getIDsKey(), g.getTokenKey()},
-		now, g.leaseSeconds, token,
-	).Result()
+	result, err := getIDScript.Run(g.ctx, g.redisClient, []string{g.getIDsKey(), g.getTokenKey()},
+		now, g.leaseSeconds, token).Result()
 	if err != nil {
 		return 0, "", fmt.Errorf("get ID failed: %w", err)
 	}
-	return result.([]interface{})[0].(int64), result.([]interface{})[1].(string), nil
+	return result.([]any)[0].(int64), result.([]any)[1].(string), nil
 }
 
 func (g *RedisGenerator) Renew(workerID int64, token string) error {
@@ -218,7 +219,6 @@ func (g *RedisGenerator) Renew(workerID int64, token string) error {
 		})
 		return nil
 	})
-
 	if err != nil {
 		return fmt.Errorf("update expire time failed: %w", err)
 	}
@@ -283,10 +283,8 @@ func (g *RedisGenerator) Release(workerID int64, token string) error {
 		Score:  0,
 		Member: workerID,
 	}).Result()
-
 	if err != nil {
 		return fmt.Errorf("reset expire time failed: %w", err)
-
 	}
 
 	return nil
