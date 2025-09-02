@@ -165,6 +165,56 @@ func (g *RedisGenerator) GetID() (int64, string, error) {
 	return result, token, nil
 }
 
+var renewScript = redis.NewScript(`
+	local tokenKey = KEYS[1]
+	local key = KEYS[2]
+	local workerID = ARGV[1]
+	local token = ARGV[2]
+	local now = tonumber(ARGV[3])
+	local lease = tonumber(ARGV[4])
+
+	-- 1. 获取 Token 记录
+	local tokenStr = redis.call('HGET', tokenKey, workerID)
+	if not tokenStr then
+		return {err="Token not found"}
+	end
+
+	-- 调试日志：输出原始tokenStr
+	redis.log(redis.LOG_NOTICE, "DEBUG: tokenStr = " .. tostring(tokenStr))
+
+	-- 更可靠的字符串分割方式
+	local colonPos = string.find(tokenStr, ":")
+	if not colonPos then
+		return {err="Invalid token format"}
+	end
+	local storedToken = string.sub(tokenStr, 1, colonPos-1)
+	local expireAtStr = string.sub(tokenStr, colonPos+1)
+
+	-- 调试日志：输出解析结果
+	redis.log(redis.LOG_NOTICE, "DEBUG: storedToken = " .. tostring(storedToken))
+	redis.log(redis.LOG_NOTICE, "DEBUG: expireAtStr = " .. tostring(expireAtStr))
+
+	-- 2. 验证 Token 匹配性
+	if storedToken ~= token then
+		redis.log(redis.LOG_NOTICE, "DEBUG: Token mismatch. Expected: " .. token .. ", Got: " .. storedToken)
+		return {err="Token mismatch"}
+	end
+
+	-- 3. 验证 Token 未过期
+	local expireAt = tonumber(expireAtStr)
+	if not expireAt or expireAt <= now then
+		return {err="Token expired"}
+	end
+
+	-- 4. 延长 Token 和 ID 的过期时间
+	local newExpireAt = now + lease
+	local newTokenStr = token .. ":" .. newExpireAt
+	redis.call('HSET', tokenKey, workerID, newTokenStr)
+	redis.call('ZADD', key, newExpireAt, workerID)
+
+	return {ok="Success"}
+`)
+
 func (g *RedisGenerator) Renew(workerID int64, token string) error {
 	if workerID < 1 || workerID > int64(g.maxWorkerID) {
 		return ErrInvalidWorkerID
@@ -177,50 +227,24 @@ func (g *RedisGenerator) Renew(workerID int64, token string) error {
 	if err != nil {
 		return fmt.Errorf("get current time failed: %w", err)
 	}
-	key := g.getIDsKey()
-	tokenKey := g.getTokenKey()
-	lease := g.leaseSeconds
 
-	// 1. 获取 Token 记录（原子操作）
-	tokenStr, err := g.redisClient.HGet(g.ctx, tokenKey, strconv.FormatInt(workerID, 10)).Result()
+	// 添加日志输出
+	fmt.Printf("Renew called with workerID: %d, token: %s\n", workerID, token)
+
+	result, err := renewScript.Run(g.ctx, g.redisClient, []string{g.getTokenKey(), g.getIDsKey()},
+		workerID, token, now, g.leaseSeconds).Result()
 	if err != nil {
-		return fmt.Errorf("get token failed: %w", err)
+		return fmt.Errorf("renew failed: %w", err)
 	}
-	if tokenStr == "" {
+
+	if result == "Token not found" {
 		return ErrNotAssigned
 	}
-	tokenData := strings.Split(tokenStr, ":")
-	if len(tokenData) != 2 {
-		return ErrInvalidToken
-	}
-	// 2. 验证 Token 匹配性
-	storedToken := tokenData[0]
-	if storedToken != token {
+	if result == "Token mismatch" {
 		return ErrTokenMismatch
 	}
-
-	// 3. 验证 Token 未过期
-	expireAt, err := strconv.ParseInt(tokenData[1], 10, 64)
-	if err != nil {
-		return fmt.Errorf("invalid expire_at format: %w", err)
-	}
-	if expireAt <= now {
+	if result == "Token expired" {
 		return ErrTokenExpired
-	}
-
-	// 4. 延长 Token 和 ID 的过期时间（now + lease）
-	newExpireAt := now + int64(lease)
-	tokenStr = fmt.Sprintf("%s:%d", token, newExpireAt)
-	_, err = g.redisClient.TxPipelined(g.ctx, func(pipe redis.Pipeliner) error {
-		pipe.HSet(g.ctx, tokenKey, workerID, tokenStr)
-		pipe.ZAdd(g.ctx, key, &redis.Z{
-			Score:  float64(newExpireAt),
-			Member: workerID,
-		})
-		return nil
-	})
-	if err != nil {
-		return fmt.Errorf("update expire time failed: %w", err)
 	}
 
 	return nil
