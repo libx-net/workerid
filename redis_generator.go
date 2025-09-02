@@ -228,8 +228,7 @@ func (g *RedisGenerator) Renew(workerID int64, token string) error {
 		return fmt.Errorf("get current time failed: %w", err)
 	}
 
-	// 添加日志输出
-	fmt.Printf("Renew called with workerID: %d, token: %s\n", workerID, token)
+
 
 	result, err := renewScript.Run(g.ctx, g.redisClient, []string{g.getTokenKey(), g.getIDsKey()},
 		workerID, token, now, g.leaseSeconds).Result()

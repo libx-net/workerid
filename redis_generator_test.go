@@ -2,6 +2,9 @@ package workerid
 
 import (
 	"context"
+	"fmt"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -182,6 +185,90 @@ func TestRedisGenerator_Renew(t *testing.T) {
 	}
 }
 
+func TestRedisGenerator_RenewWithRedisStateCheck(t *testing.T) {
+	client, cleanup := setupTestRedis(t)
+	defer cleanup()
+
+	gen, err := NewRedisGenerator(client, "test-cluster")
+	if err != nil {
+		t.Fatalf("创建 RedisGenerator 失败: %v", err)
+	}
+
+	// 先获取一个 ID
+	workerID, token, err := gen.GetID()
+	if err != nil {
+		t.Fatalf("GetID() 失败: %v", err)
+	}
+
+	ctx := context.Background()
+	idsKey := gen.getIDsKey()
+	tokenKey := gen.getTokenKey()
+
+	// 获取续期前的过期时间
+	beforeScore, err := client.ZScore(ctx, idsKey, fmt.Sprintf("%d", workerID)).Result()
+	if err != nil {
+		t.Fatalf("获取续期前的过期时间失败: %v", err)
+	}
+
+	// 获取续期前的 Token 数据
+	beforeTokenData, err := client.HGet(ctx, tokenKey, fmt.Sprintf("%d", workerID)).Result()
+	if err != nil {
+		t.Fatalf("获取续期前的 Token 数据失败: %v", err)
+	}
+
+	// 等待至少 1 秒，确保时间戳有差异（getCurrentTime 返回秒级时间戳）
+	time.Sleep(1100 * time.Millisecond)
+
+	// 执行续期
+	err = gen.Renew(workerID, token)
+	if err != nil {
+		t.Fatalf("Renew() 失败: %v", err)
+	}
+
+	// 获取续期后的过期时间
+	afterScore, err := client.ZScore(ctx, idsKey, fmt.Sprintf("%d", workerID)).Result()
+	if err != nil {
+		t.Fatalf("获取续期后的过期时间失败: %v", err)
+	}
+
+	// 获取续期后的 Token 数据
+	afterTokenData, err := client.HGet(ctx, tokenKey, fmt.Sprintf("%d", workerID)).Result()
+	if err != nil {
+		t.Fatalf("获取续期后的 Token 数据失败: %v", err)
+	}
+
+	// 验证过期时间已更新（应该比之前的时间更大）
+	if afterScore <= beforeScore {
+		t.Errorf("续期后的过期时间应该更大，续期前: %f, 续期后: %f", beforeScore, afterScore)
+	}
+
+	// 验证 Token 数据已更新
+	if afterTokenData == beforeTokenData {
+		t.Error("续期后的 Token 数据应该已更新")
+	}
+
+	// 验证 Token 数据格式正确
+	tokenParts := strings.Split(afterTokenData, ":")
+	if len(tokenParts) != 2 {
+		t.Errorf("Token 数据格式错误: %s", afterTokenData)
+	}
+
+	// 验证 Token 部分没有变化
+	if tokenParts[0] != token {
+		t.Errorf("Token 部分不应该变化，期望: %s, 实际: %s", token, tokenParts[0])
+	}
+
+	// 验证过期时间部分已更新
+	newExpireTime, err := strconv.ParseFloat(tokenParts[1], 64)
+	if err != nil {
+		t.Fatalf("解析新的过期时间失败: %v", err)
+	}
+
+	if newExpireTime != afterScore {
+		t.Errorf("Token 中的过期时间与 ZSet 中的分数不匹配，Token: %f, ZSet: %f", newExpireTime, afterScore)
+	}
+}
+
 func TestRedisGenerator_Release(t *testing.T) {
 	client, cleanup := setupTestRedis(t)
 	defer cleanup()
@@ -236,6 +323,119 @@ func TestRedisGenerator_Release(t *testing.T) {
 				t.Errorf("Release() 错误 = %v, 期望错误 %v", err, tt.wantErr)
 			}
 		})
+	}
+}
+
+func TestRedisGenerator_ReleaseWithRedisStateCheck(t *testing.T) {
+	client, cleanup := setupTestRedis(t)
+	defer cleanup()
+
+	gen, err := NewRedisGenerator(client, "test-cluster")
+	if err != nil {
+		t.Fatalf("创建 RedisGenerator 失败: %v", err)
+	}
+
+	// 先获取一个 ID
+	workerID, token, err := gen.GetID()
+	if err != nil {
+		t.Fatalf("GetID() 失败: %v", err)
+	}
+
+	ctx := context.Background()
+	idsKey := gen.getIDsKey()
+	tokenKey := gen.getTokenKey()
+
+	// 验证释放前的状态
+	// 1. 检查 WorkerID 在 ZSet 中的分数（过期时间）应该大于 0
+	beforeScore, err := client.ZScore(ctx, idsKey, fmt.Sprintf("%d", workerID)).Result()
+	if err != nil {
+		t.Fatalf("获取释放前的过期时间失败: %v", err)
+	}
+	if beforeScore <= 0 {
+		t.Errorf("释放前的过期时间应该大于 0，实际值: %f", beforeScore)
+	}
+
+	// 2. 检查 Token 映射关系存在
+	beforeTokenData, err := client.HGet(ctx, tokenKey, fmt.Sprintf("%d", workerID)).Result()
+	if err != nil {
+		t.Fatalf("获取释放前的 Token 数据失败: %v", err)
+	}
+	if beforeTokenData == "" {
+		t.Error("释放前应该存在 Token 映射关系")
+	}
+
+	// 验证 Token 数据格式
+	tokenParts := strings.Split(beforeTokenData, ":")
+	if len(tokenParts) != 2 {
+		t.Errorf("Token 数据格式错误: %s", beforeTokenData)
+	}
+	if tokenParts[0] != token {
+		t.Errorf("Token 不匹配，期望: %s, 实际: %s", token, tokenParts[0])
+	}
+
+	// 执行释放
+	err = gen.Release(workerID, token)
+	if err != nil {
+		t.Fatalf("Release() 失败: %v", err)
+	}
+
+	// 验证释放后的状态
+	// 1. 检查 WorkerID 在 ZSet 中的分数应该重置为 0
+	afterScore, err := client.ZScore(ctx, idsKey, fmt.Sprintf("%d", workerID)).Result()
+	if err != nil {
+		t.Fatalf("获取释放后的过期时间失败: %v", err)
+	}
+	if afterScore != 0 {
+		t.Errorf("释放后的过期时间应该重置为 0，实际值: %f", afterScore)
+	}
+
+	// 2. 检查 Token 映射关系已移除
+	afterTokenData, err := client.HGet(ctx, tokenKey, fmt.Sprintf("%d", workerID)).Result()
+	if err != redis.Nil && err != nil {
+		t.Fatalf("检查释放后的 Token 数据失败: %v", err)
+	}
+	if afterTokenData != "" {
+		t.Errorf("释放后 Token 映射关系应该已移除，但仍存在: %s", afterTokenData)
+	}
+
+	// 3. 验证 WorkerID 可以被重新分配
+	newWorkerID, newToken, err := gen.GetID()
+	if err != nil {
+		t.Fatalf("释放后重新获取 ID 失败: %v", err)
+	}
+
+	// 由于我们只释放了一个 ID，在小的 maxWorkerID 情况下，很可能会重新分配到同一个 ID
+	if newWorkerID <= 0 || newWorkerID > int64(gen.maxWorkerID) {
+		t.Errorf("重新分配的 WorkerID 应该在有效范围内，实际值: %d", newWorkerID)
+	}
+
+	if newToken == token {
+		t.Error("重新分配的 Token 应该与之前的不同")
+	}
+
+	// 验证新分配的 ID 在 Redis 中的状态正确
+	newScore, err := client.ZScore(ctx, idsKey, fmt.Sprintf("%d", newWorkerID)).Result()
+	if err != nil {
+		t.Fatalf("获取重新分配的 ID 过期时间失败: %v", err)
+	}
+	if newScore <= 0 {
+		t.Errorf("重新分配的 ID 过期时间应该大于 0，实际值: %f", newScore)
+	}
+
+	newTokenData, err := client.HGet(ctx, tokenKey, fmt.Sprintf("%d", newWorkerID)).Result()
+	if err != nil {
+		t.Fatalf("获取重新分配的 Token 数据失败: %v", err)
+	}
+	if newTokenData == "" {
+		t.Error("重新分配的 ID 应该有对应的 Token 映射关系")
+	}
+
+	newTokenParts := strings.Split(newTokenData, ":")
+	if len(newTokenParts) != 2 {
+		t.Errorf("重新分配的 Token 数据格式错误: %s", newTokenData)
+	}
+	if newTokenParts[0] != newToken {
+		t.Errorf("重新分配的 Token 不匹配，期望: %s, 实际: %s", newToken, newTokenParts[0])
 	}
 }
 
