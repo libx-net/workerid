@@ -75,7 +75,7 @@ func (g *RedisGenerator) getCurrentTime() (int64, error) {
 func (g *RedisGenerator) initAvailableIDs() error {
 	key := g.getIDsKey()
 	// 如果 key 已经存在，则直接返回
-	if _, err := g.redisClient.Exists(g.ctx, key).Result(); err == nil {
+	if n, err := g.redisClient.ZCard(g.ctx, key).Result(); err == nil && n > 0 {
 		return nil
 	}
 	pipe := g.redisClient.Pipeline()
@@ -141,14 +141,14 @@ var getIDScript = redis.NewScript(`
 	-- 更新 ID 状态
 	redis.call('ZADD', key, newExpire, workerID)
 
-	-- 生成并存储 Token
+	-- 存储 Token
 	local tokenKey = KEYS[2]
 	local token = ARGV[3]
 	local tokenData = token .. ':' .. newExpire
-	redis.call('HSET', tokenKey, 'token', workerID, tokenData)
+	redis.call('HSET', tokenKey, workerID, tokenData)
 	redis.call('EXPIRE', tokenKey, lease * 2)  -- 设置 Token 过期时间
 
-	return {workerID, token}	
+	return workerID
 `)
 
 func (g *RedisGenerator) GetID() (int64, string, error) {
@@ -158,11 +158,11 @@ func (g *RedisGenerator) GetID() (int64, string, error) {
 		return 0, "", fmt.Errorf("get current time failed: %w", err)
 	}
 	result, err := getIDScript.Run(g.ctx, g.redisClient, []string{g.getIDsKey(), g.getTokenKey()},
-		now, g.leaseSeconds, token).Result()
+		now, g.leaseSeconds, token).Int64()
 	if err != nil {
 		return 0, "", fmt.Errorf("get ID failed: %w", err)
 	}
-	return result.([]any)[0].(int64), result.([]any)[1].(string), nil
+	return result, token, nil
 }
 
 func (g *RedisGenerator) Renew(workerID int64, token string) error {
