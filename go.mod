@@ -2,6 +2,8 @@ module libx.net/workerid
 
 go 1.23.0
 
+retract v0.1.0
+
 require github.com/go-redis/redis/v8 v8.11.5
 
 require (
