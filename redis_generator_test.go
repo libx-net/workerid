@@ -1,0 +1,371 @@
+package workerid
+
+import (
+	"context"
+	"testing"
+	"time"
+
+	"github.com/alicebob/miniredis/v2"
+	"github.com/go-redis/redis/v8"
+)
+
+func setupTestRedis(t *testing.T) (*redis.Client, func()) {
+	// 启动 miniredis 服务器
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatalf("启动 miniredis 失败: %v", err)
+	}
+
+	// 创建 Redis 客户端
+	client := redis.NewClient(&redis.Options{
+		Addr: mr.Addr(),
+	})
+
+	// 测试连接
+	ctx := context.Background()
+	if err := client.Ping(ctx).Err(); err != nil {
+		mr.Close()
+		t.Fatalf("连接 Redis 失败: %v", err)
+	}
+
+	// 返回客户端和清理函数
+	return client, func() {
+		client.Close()
+		mr.Close()
+	}
+}
+
+func TestNewRedisGenerator(t *testing.T) {
+	client, cleanup := setupTestRedis(t)
+	defer cleanup()
+
+	tests := []struct {
+		name    string
+		cluster string
+		options []Option
+		wantErr bool
+	}{
+		{
+			name:    "正常创建",
+			cluster: "test-cluster",
+			options: nil,
+			wantErr: false,
+		},
+		{
+			name:    "自定义配置",
+			cluster: "test-cluster-2",
+			options: []Option{WithMaxWorkerID(100), WithMaxLeaseTime(10 * time.Minute)},
+			wantErr: false,
+		},
+		{
+			name:    "空集群名称",
+			cluster: "",
+			options: nil,
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gen, err := NewRedisGenerator(client, tt.cluster, tt.options...)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("NewRedisGenerator() 错误 = %v, 期望错误 %v", err, tt.wantErr)
+				return
+			}
+			if !tt.wantErr && gen == nil {
+				t.Error("NewRedisGenerator() 返回 nil")
+			}
+		})
+	}
+}
+
+func TestRedisGenerator_GetID(t *testing.T) {
+	client, cleanup := setupTestRedis(t)
+	defer cleanup()
+
+	gen, err := NewRedisGenerator(client, "test-cluster")
+	if err != nil {
+		t.Fatalf("创建 RedisGenerator 失败: %v", err)
+	}
+
+	// 测试获取 ID
+	workerID, token, err := gen.GetID()
+	if err != nil {
+		t.Errorf("GetID() 返回错误: %v", err)
+	}
+
+	if workerID <= 0 || workerID > int64(gen.maxWorkerID) {
+		t.Errorf("WorkerID 应该在 1-%d 范围内, 实际值: %d", gen.maxWorkerID, workerID)
+	}
+
+	if len(token) != 22 {
+		t.Errorf("Token 长度应该为 22, 实际长度: %d", len(token))
+	}
+
+	// 测试获取多个 ID
+	workerID2, token2, err := gen.GetID()
+	if err != nil {
+		t.Errorf("第二次 GetID() 返回错误: %v", err)
+	}
+
+	// 应该获取到不同的 ID 或相同的 ID（取决于可用性）
+	if workerID2 <= 0 || workerID2 > int64(gen.maxWorkerID) {
+		t.Errorf("第二个 WorkerID 应该在 1-%d 范围内, 实际值: %d", gen.maxWorkerID, workerID2)
+	}
+
+	// Token 应该不同
+	if token == token2 {
+		t.Error("不同的获取请求应该生成不同的 Token")
+	}
+}
+
+func TestRedisGenerator_Renew(t *testing.T) {
+	client, cleanup := setupTestRedis(t)
+	defer cleanup()
+
+	gen, err := NewRedisGenerator(client, "test-cluster")
+	if err != nil {
+		t.Fatalf("创建 RedisGenerator 失败: %v", err)
+	}
+
+	// 先获取一个 ID
+	workerID, token, err := gen.GetID()
+	if err != nil {
+		t.Fatalf("GetID() 失败: %v", err)
+	}
+
+	tests := []struct {
+		name     string
+		workerID int64
+		token    string
+		wantErr  bool
+	}{
+		{
+			name:     "正确续期",
+			workerID: workerID,
+			token:    token,
+			wantErr:  false,
+		},
+		{
+			name:     "无效的WorkerID",
+			workerID: 0,
+			token:    token,
+			wantErr:  true,
+		},
+		{
+			name:     "WorkerID超出范围",
+			workerID: int64(gen.maxWorkerID) + 1,
+			token:    token,
+			wantErr:  true,
+		},
+		{
+			name:     "无效的Token格式",
+			workerID: workerID,
+			token:    "invalid",
+			wantErr:  true,
+		},
+		{
+			name:     "错误的Token",
+			workerID: workerID,
+			token:    "abcdefghijklmnopqrstuv",
+			wantErr:  true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := gen.Renew(tt.workerID, tt.token)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("Renew() 错误 = %v, 期望错误 %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestRedisGenerator_Release(t *testing.T) {
+	client, cleanup := setupTestRedis(t)
+	defer cleanup()
+
+	gen, err := NewRedisGenerator(client, "test-cluster")
+	if err != nil {
+		t.Fatalf("创建 RedisGenerator 失败: %v", err)
+	}
+
+	// 先获取一个 ID
+	workerID, token, err := gen.GetID()
+	if err != nil {
+		t.Fatalf("GetID() 失败: %v", err)
+	}
+
+	tests := []struct {
+		name     string
+		workerID int64
+		token    string
+		wantErr  bool
+	}{
+		{
+			name:     "无效的WorkerID",
+			workerID: 0,
+			token:    token,
+			wantErr:  true,
+		},
+		{
+			name:     "WorkerID超出范围",
+			workerID: int64(gen.maxWorkerID) + 1,
+			token:    token,
+			wantErr:  true,
+		},
+		{
+			name:     "无效的Token格式",
+			workerID: workerID,
+			token:    "invalid",
+			wantErr:  true,
+		},
+		{
+			name:     "正确释放",
+			workerID: workerID,
+			token:    token,
+			wantErr:  false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := gen.Release(tt.workerID, tt.token)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("Release() 错误 = %v, 期望错误 %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestRedisGenerator_ReleaseAndReuse(t *testing.T) {
+	client, cleanup := setupTestRedis(t)
+	defer cleanup()
+
+	gen, err := NewRedisGenerator(client, "test-cluster", WithMaxWorkerID(2))
+	if err != nil {
+		t.Fatalf("创建 RedisGenerator 失败: %v", err)
+	}
+
+	// 获取第一个 ID
+	workerID1, token1, err := gen.GetID()
+	if err != nil {
+		t.Fatalf("获取第一个 ID 失败: %v", err)
+	}
+
+	// 获取第二个 ID
+	_, token2, err := gen.GetID()
+	if err != nil {
+		t.Fatalf("获取第二个 ID 失败: %v", err)
+	}
+
+	// 释放第一个 ID
+	err = gen.Release(workerID1, token1)
+	if err != nil {
+		t.Fatalf("释放第一个 ID 失败: %v", err)
+	}
+
+	// 应该能够重新获取到 ID（可能是之前释放的 ID）
+	workerID3, token3, err := gen.GetID()
+	if err != nil {
+		t.Fatalf("重新获取 ID 失败: %v", err)
+	}
+
+	// 验证获取到的 ID 有效
+	if workerID3 <= 0 || workerID3 > 2 {
+		t.Errorf("重新获取的 WorkerID 应该在 1-2 范围内, 实际值: %d", workerID3)
+	}
+
+	// Token 应该不同
+	if token3 == token1 || token3 == token2 {
+		t.Error("重新获取的 Token 应该与之前的不同")
+	}
+}
+
+func TestRedisGenerator_ConcurrentAccess(t *testing.T) {
+	client, cleanup := setupTestRedis(t)
+	defer cleanup()
+
+	gen, err := NewRedisGenerator(client, "test-cluster", WithMaxWorkerID(10))
+	if err != nil {
+		t.Fatalf("创建 RedisGenerator 失败: %v", err)
+	}
+
+	// 并发获取 ID
+	const numGoroutines = 5
+	results := make(chan struct {
+		workerID int64
+		token    string
+		err      error
+	}, numGoroutines)
+
+	for i := 0; i < numGoroutines; i++ {
+		go func() {
+			workerID, token, err := gen.GetID()
+			results <- struct {
+				workerID int64
+				token    string
+				err      error
+			}{workerID, token, err}
+		}()
+	}
+
+	// 收集结果
+	workerIDs := make(map[int64]bool)
+	tokens := make(map[string]bool)
+
+	for i := 0; i < numGoroutines; i++ {
+		result := <-results
+		if result.err != nil {
+			t.Errorf("并发获取 ID 失败: %v", result.err)
+			continue
+		}
+
+		// 检查 WorkerID 唯一性（在当前时刻）
+		if workerIDs[result.workerID] {
+			t.Errorf("WorkerID %d 被重复分配", result.workerID)
+		}
+		workerIDs[result.workerID] = true
+
+		// 检查 Token 唯一性
+		if tokens[result.token] {
+			t.Errorf("Token %s 被重复生成", result.token)
+		}
+		tokens[result.token] = true
+	}
+}
+
+func TestRedisGenerator_WithOptions(t *testing.T) {
+	client, cleanup := setupTestRedis(t)
+	defer cleanup()
+
+	maxWorkerID := uint32(50)
+	maxLeaseTime := 10 * time.Minute
+
+	gen, err := NewRedisGenerator(client, "test-cluster",
+		WithMaxWorkerID(maxWorkerID),
+		WithMaxLeaseTime(maxLeaseTime))
+	if err != nil {
+		t.Fatalf("创建 RedisGenerator 失败: %v", err)
+	}
+
+	// 验证配置生效
+	if gen.maxWorkerID != maxWorkerID {
+		t.Errorf("maxWorkerID = %d, 期望 %d", gen.maxWorkerID, maxWorkerID)
+	}
+
+	if gen.leaseSeconds != int(maxLeaseTime.Seconds()) {
+		t.Errorf("leaseSeconds = %d, 期望 %d", gen.leaseSeconds, int(maxLeaseTime.Seconds()))
+	}
+
+	// 测试获取 ID 在指定范围内
+	workerID, _, err := gen.GetID()
+	if err != nil {
+		t.Fatalf("GetID() 失败: %v", err)
+	}
+
+	if workerID <= 0 || workerID > int64(maxWorkerID) {
+		t.Errorf("WorkerID 应该在 1-%d 范围内, 实际值: %d", maxWorkerID, workerID)
+	}
+}
