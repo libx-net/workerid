@@ -569,3 +569,96 @@ func TestRedisGenerator_WithOptions(t *testing.T) {
 		t.Errorf("WorkerID 应该在 1-%d 范围内, 实际值: %d", maxWorkerID, workerID)
 	}
 }
+
+// TestRedisGenerator_RenewHashExpiration 测试续期时 Hash 过期时间是否正确更新
+func TestRedisGenerator_RenewHashExpiration(t *testing.T) {
+	client, cleanup := setupTestRedis(t)
+	defer cleanup()
+
+	gen, err := NewRedisGenerator(client, "test-cluster", WithMaxLeaseTime(5*time.Second))
+	if err != nil {
+		t.Fatalf("创建 RedisGenerator 失败: %v", err)
+	}
+
+	// 获取 WorkerID
+	workerID, token, err := gen.GetID()
+	if err != nil {
+		t.Fatalf("GetID() 失败: %v", err)
+	}
+
+	tokenKey := gen.getTokenKey()
+
+	// 检查初始 Hash 过期时间
+	initialTTL, err := client.TTL(context.Background(), tokenKey).Result()
+	if err != nil {
+		t.Fatalf("获取初始 TTL 失败: %v", err)
+	}
+	if initialTTL <= 0 {
+		t.Fatalf("初始 TTL 应该大于 0，实际值: %v", initialTTL)
+	}
+
+	// 期望的完整 TTL 值（lease * 3 = 15 秒）
+	expectedFullTTL := time.Duration(gen.leaseSeconds*3) * time.Second
+	
+	t.Logf("初始 TTL: %v, 期望完整 TTL: %v", initialTTL, expectedFullTTL)
+
+	// 手动设置一个较短的 TTL 来模拟接近过期的场景
+	shortTTL := 3 * time.Second
+	err = client.Expire(context.Background(), tokenKey, shortTTL).Err()
+	if err != nil {
+		t.Fatalf("设置短 TTL 失败: %v", err)
+	}
+
+	// 验证 TTL 已经被设置为较短的值
+	beforeRenewTTL, err := client.TTL(context.Background(), tokenKey).Result()
+	if err != nil {
+		t.Fatalf("获取续期前 TTL 失败: %v", err)
+	}
+
+	if beforeRenewTTL > shortTTL+time.Second {
+		t.Fatalf("TTL 应该被设置为较短的值，期望约 %v，实际: %v", shortTTL, beforeRenewTTL)
+	}
+
+	t.Logf("手动设置短 TTL 后: %v", beforeRenewTTL)
+
+	// 执行续期
+	err = gen.Renew(workerID, token)
+	if err != nil {
+		t.Fatalf("Renew() 失败: %v", err)
+	}
+
+	// 检查续期后 Hash 过期时间是否重新设置
+	afterRenewTTL, err := client.TTL(context.Background(), tokenKey).Result()
+	if err != nil {
+		t.Fatalf("获取续期后 TTL 失败: %v", err)
+	}
+
+	// 关键验证1：续期后的 TTL 应该比续期前的 TTL 大很多（证明续期生效）
+	if afterRenewTTL <= beforeRenewTTL {
+		t.Errorf("续期后 TTL 应该比续期前大，续期前: %v, 续期后: %v", beforeRenewTTL, afterRenewTTL)
+	}
+
+	// 关键验证2：续期后 TTL 应该接近完整的期望值
+	if afterRenewTTL < expectedFullTTL-2*time.Second {
+		t.Errorf("续期后 TTL 应该接近完整值 %v，实际值: %v", expectedFullTTL, afterRenewTTL)
+	}
+
+	// 关键验证3：续期的效果应该显著（TTL 增加应该很明显）
+	ttlIncrease := afterRenewTTL - beforeRenewTTL
+	minExpectedIncrease := 8 * time.Second // 从 3 秒增加到 15 秒，至少应该增加 8 秒
+	if ttlIncrease < minExpectedIncrease {
+		t.Errorf("续期效果不够显著，TTL 增加量: %v, 期望至少增加: %v", ttlIncrease, minExpectedIncrease)
+	}
+
+	// 验证 Hash 内容仍然存在且正确
+	tokenData, err := client.HGet(context.Background(), tokenKey, strconv.Itoa(int(workerID))).Result()
+	if err != nil {
+		t.Fatalf("获取续期后 token 数据失败: %v", err)
+	}
+	if tokenData == "" {
+		t.Fatalf("续期后 token 数据不应该为空")
+	}
+
+	t.Logf("续期验证成功 - 续期前: %v, 续期后: %v, TTL 增加: %v, Hash 数据存在: %v", 
+		beforeRenewTTL, afterRenewTTL, ttlIncrease, tokenData != "")
+}

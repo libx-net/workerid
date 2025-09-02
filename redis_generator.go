@@ -146,7 +146,7 @@ var getIDScript = redis.NewScript(`
 	local token = ARGV[3]
 	local tokenData = token .. ':' .. newExpire
 	redis.call('HSET', tokenKey, workerID, tokenData)
-	redis.call('EXPIRE', tokenKey, lease * 2)  -- 设置 Token 过期时间
+	redis.call('EXPIRE', tokenKey, lease * 3)  -- 设置 Token 过期时间
 
 	return workerID
 `)
@@ -179,9 +179,6 @@ var renewScript = redis.NewScript(`
 		return {err="Token not found"}
 	end
 
-	-- 调试日志：输出原始tokenStr
-	redis.log(redis.LOG_NOTICE, "DEBUG: tokenStr = " .. tostring(tokenStr))
-
 	-- 更可靠的字符串分割方式
 	local colonPos = string.find(tokenStr, ":")
 	if not colonPos then
@@ -190,13 +187,8 @@ var renewScript = redis.NewScript(`
 	local storedToken = string.sub(tokenStr, 1, colonPos-1)
 	local expireAtStr = string.sub(tokenStr, colonPos+1)
 
-	-- 调试日志：输出解析结果
-	redis.log(redis.LOG_NOTICE, "DEBUG: storedToken = " .. tostring(storedToken))
-	redis.log(redis.LOG_NOTICE, "DEBUG: expireAtStr = " .. tostring(expireAtStr))
-
 	-- 2. 验证 Token 匹配性
 	if storedToken ~= token then
-		redis.log(redis.LOG_NOTICE, "DEBUG: Token mismatch. Expected: " .. token .. ", Got: " .. storedToken)
 		return {err="Token mismatch"}
 	end
 
@@ -211,6 +203,9 @@ var renewScript = redis.NewScript(`
 	local newTokenStr = token .. ":" .. newExpireAt
 	redis.call('HSET', tokenKey, workerID, newTokenStr)
 	redis.call('ZADD', key, newExpireAt, workerID)
+	
+	-- 5. 重新设置 Token Hash 的过期时间，防止整个 Hash 过期
+	redis.call('EXPIRE', tokenKey, lease * 3)
 
 	return {ok="Success"}
 `)
@@ -227,8 +222,6 @@ func (g *RedisGenerator) Renew(workerID int64, token string) error {
 	if err != nil {
 		return fmt.Errorf("get current time failed: %w", err)
 	}
-
-
 
 	result, err := renewScript.Run(g.ctx, g.redisClient, []string{g.getTokenKey(), g.getIDsKey()},
 		workerID, token, now, g.leaseSeconds).Result()
