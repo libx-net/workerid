@@ -1,5 +1,13 @@
 # WorkerID ChangeLog
 
+## WorkerID v0.1.2
+
+### Refactoring
+* refactor: renew 方法改用 lua 代替事务，兼容某些不支持事务的 redis 集群 (762c4dd) (@krwu)
+
+### Testing improvements
+* test: add comprehensive unit tests with miniredis framework (ec6cbf9) (@krwu)
+
 ## WorkerID v0.1.1
 
 ### Bug fixes
