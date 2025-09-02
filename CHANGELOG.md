@@ -1,5 +1,13 @@
 # WorkerID ChangeLog
 
+## WorkerID v0.1.3
+
+### Bug fixes
+* fix: resolve hash expiration issue in renew operation (e35d62f) (@krwu)
+
+### Testing improvements
+* test: add comprehensive test for hash expiration behavior during renew operations (e35d62f) (@krwu)
+
 ## WorkerID v0.1.2
 
 ### Refactoring
