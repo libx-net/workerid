@@ -68,9 +68,7 @@ linters:
       - examples$
 formatters:
   enable:
-    - gci
     - gofmt
-    - gofumpt
     - goimports
   settings:
     gofmt:
