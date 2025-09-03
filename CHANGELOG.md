@@ -1,5 +1,25 @@
 # WorkerID ChangeLog
 
+## WorkerID v0.2.0
+
+### ⚠️ BREAKING CHANGES
+* **feat!: replace WithMaxWorkerID with WithWorkerBits option** (387378c) (@krwu)
+  - Replace `WithMaxWorkerID(maxWorkers uint32)` with `WithWorkerBits(workerBits uint)`
+  - Change default maxWorkerID from 1000 to 511 (9 bits)
+  - Update WorkerID range to start from 0 instead of 1
+  - Migration guide: Replace `WithMaxWorkerID(n)` with `WithWorkerBits(bits)` where `n = (1<<bits)-1`
+
+### Features
+* feat: add comprehensive TestWithWorkerBits test covering multiple bit configurations (387378c) (@krwu)
+* feat: ensure Redis initialization creates WorkerIDs from 0 to maxWorkerID (387378c) (@krwu)
+
+### Documentation updates
+* docs: fix parameter type inconsistency in documentation (uint32 -> uint) (387378c) (@krwu)
+* docs: remove Chinese README (README_CN.md) to maintain single documentation (387378c) (@krwu)
+
+### Testing improvements
+* test: update all test cases to use new WithWorkerBits option (387378c) (@krwu)
+
 ## WorkerID v0.1.3
 
 ### Bug fixes
