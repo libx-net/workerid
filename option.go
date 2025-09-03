@@ -12,9 +12,9 @@ type generatorOptions struct {
 
 type Option func(*generatorOptions)
 
-func WithMaxWorkerID(maxWorkers uint32) Option {
+func WithWorkerBits(workerBits uint) Option {
 	return func(o *generatorOptions) {
-		o.maxWorkerID = maxWorkers
+		o.maxWorkerID = 1<<workerBits - 1
 	}
 }
 

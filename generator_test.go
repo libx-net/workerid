@@ -64,8 +64,8 @@ func TestGenerator_Interface(t *testing.T) {
 				return
 			}
 
-			if workerID <= 0 {
-				t.Errorf("WorkerID 应该大于 0, 实际值: %d", workerID)
+			if workerID < 0 {
+				t.Errorf("WorkerID 应该大于等于 0, 实际值: %d", workerID)
 			}
 
 			if len(token) != 22 {
@@ -140,24 +140,24 @@ func TestGenerateToken(t *testing.T) {
 	tokens := make(map[string]bool)
 	for i := 0; i < 100; i++ {
 		token := generateToken()
-		
+
 		// 检查长度
 		if len(token) != 22 {
 			t.Errorf("Token 长度应该为 22, 实际长度: %d", len(token))
 		}
-		
+
 		// 检查唯一性
 		if tokens[token] {
 			t.Errorf("Token %s 重复生成", token)
 		}
 		tokens[token] = true
-		
+
 		// 检查字符集（base64 URL 编码）
 		for _, char := range token {
-			if !((char >= 'A' && char <= 'Z') || 
-				 (char >= 'a' && char <= 'z') || 
-				 (char >= '0' && char <= '9') || 
-				 char == '-' || char == '_') {
+			if !((char >= 'A' && char <= 'Z') ||
+				(char >= 'a' && char <= 'z') ||
+				(char >= '0' && char <= '9') ||
+				char == '-' || char == '_') {
 				t.Errorf("Token 包含无效字符: %c", char)
 			}
 		}

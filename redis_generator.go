@@ -28,7 +28,7 @@ var _ Generator = (*RedisGenerator)(nil)
 func NewRedisGenerator(redisClient *redis.Client, cluster string, options ...Option) (*RedisGenerator, error) {
 	opts := &generatorOptions{
 		cluster:      cluster,
-		maxWorkerID:  1000,
+		maxWorkerID:  511, // 默认 512 个 WorkerID，最大 WorkerID 为 511
 		maxLeaseTime: 5 * time.Minute,
 	}
 	for _, o := range options {
@@ -41,7 +41,7 @@ func NewRedisGenerator(redisClient *redis.Client, cluster string, options ...Opt
 		opts.maxLeaseTime = 5 * time.Minute
 	}
 	if opts.maxWorkerID <= 0 {
-		opts.maxWorkerID = 1000
+		opts.maxWorkerID = 511
 	}
 
 	allocator := &RedisGenerator{
@@ -79,7 +79,7 @@ func (g *RedisGenerator) initAvailableIDs() error {
 		return nil
 	}
 	pipe := g.redisClient.Pipeline()
-	for i := 1; i <= int(g.maxWorkerID); i++ {
+	for i := 0; i <= int(g.maxWorkerID); i++ {
 		pipe.ZAdd(g.ctx, key, &redis.Z{
 			Score:  0,
 			Member: strconv.Itoa(i),
@@ -98,33 +98,6 @@ func (g *RedisGenerator) getIDsKey() string {
 func (g *RedisGenerator) getTokenKey() string {
 	return fmt.Sprintf("{workerid:cluster:%s}:tokens", g.cluster)
 }
-
-/*
-// acquireLock 获取分布式锁（SETNX + EXPIRE）
-func (g *RedisGenerator) acquireLock() (bool, error) {
-	// 使用 SET key value NX PX timeout 保证原子性
-	result, err := g.redisClient.SetNX(g.ctx, g.lockKey, g.lockVal, time.Millisecond*5).Result()
-	if err != nil {
-		return false, fmt.Errorf("redis set lock failed: %w", err)
-	}
-	return result, nil
-}
-
-var releaseScript = redis.NewScript(`
-	if redis.call('GET', KEYS[1]) == ARGV[1] then
-		return redis.call('DEL', KEYS[1])
-	else
-		return 0
-	end
-`)
-
-// releaseLock 释放分布式锁（Lua 脚本保证原子性）
-func (g *RedisGenerator) releaseLock() error {
-	// 使用 Lua 脚本避免误删其他客户端的锁
-	_, err := releaseScript.Run(g.ctx, g.redisClient, []string{g.lockKey}, g.lockVal).Result()
-	return err
-}
-*/
 
 var getIDScript = redis.NewScript(`
 	local key = KEYS[1]
@@ -211,7 +184,7 @@ var renewScript = redis.NewScript(`
 `)
 
 func (g *RedisGenerator) Renew(workerID int64, token string) error {
-	if workerID < 1 || workerID > int64(g.maxWorkerID) {
+	if workerID < 0 || workerID > int64(g.maxWorkerID) {
 		return ErrInvalidWorkerID
 	}
 	if len(token) != 22 {
@@ -244,7 +217,7 @@ func (g *RedisGenerator) Renew(workerID int64, token string) error {
 
 // Release 主动释放 WorkerID（使其可被重新分配）
 func (g *RedisGenerator) Release(workerID int64, token string) error {
-	if workerID < 1 || workerID > int64(g.maxWorkerID) {
+	if workerID < 0 || workerID > int64(g.maxWorkerID) {
 		return ErrInvalidWorkerID
 	}
 

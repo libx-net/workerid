@@ -2,6 +2,7 @@ package workerid
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -57,7 +58,7 @@ func TestNewRedisGenerator(t *testing.T) {
 		{
 			name:    "自定义配置",
 			cluster: "test-cluster-2",
-			options: []Option{WithMaxWorkerID(100), WithMaxLeaseTime(10 * time.Minute)},
+			options: []Option{WithWorkerBits(7), WithMaxLeaseTime(10 * time.Minute)},
 			wantErr: false,
 		},
 		{
@@ -97,8 +98,8 @@ func TestRedisGenerator_GetID(t *testing.T) {
 		t.Errorf("GetID() 返回错误: %v", err)
 	}
 
-	if workerID <= 0 || workerID > int64(gen.maxWorkerID) {
-		t.Errorf("WorkerID 应该在 1-%d 范围内, 实际值: %d", gen.maxWorkerID, workerID)
+	if workerID < 0 || workerID > int64(gen.maxWorkerID) {
+		t.Errorf("WorkerID 应该在 0-%d 范围内, 实际值: %d", gen.maxWorkerID, workerID)
 	}
 
 	if len(token) != 22 {
@@ -112,8 +113,8 @@ func TestRedisGenerator_GetID(t *testing.T) {
 	}
 
 	// 应该获取到不同的 ID 或相同的 ID（取决于可用性）
-	if workerID2 <= 0 || workerID2 > int64(gen.maxWorkerID) {
-		t.Errorf("第二个 WorkerID 应该在 1-%d 范围内, 实际值: %d", gen.maxWorkerID, workerID2)
+	if workerID2 < 0 || workerID2 > int64(gen.maxWorkerID) {
+		t.Errorf("第二个 WorkerID 应该在 0-%d 范围内, 实际值: %d", gen.maxWorkerID, workerID2)
 	}
 
 	// Token 应该不同
@@ -151,7 +152,7 @@ func TestRedisGenerator_Renew(t *testing.T) {
 		},
 		{
 			name:     "无效的WorkerID",
-			workerID: 0,
+			workerID: -1,
 			token:    token,
 			wantErr:  true,
 		},
@@ -292,7 +293,7 @@ func TestRedisGenerator_Release(t *testing.T) {
 	}{
 		{
 			name:     "无效的WorkerID",
-			workerID: 0,
+			workerID: -1,
 			token:    token,
 			wantErr:  true,
 		},
@@ -405,7 +406,7 @@ func TestRedisGenerator_ReleaseWithRedisStateCheck(t *testing.T) {
 	}
 
 	// 由于我们只释放了一个 ID，在小的 maxWorkerID 情况下，很可能会重新分配到同一个 ID
-	if newWorkerID <= 0 || newWorkerID > int64(gen.maxWorkerID) {
+	if newWorkerID < 0 || newWorkerID > int64(gen.maxWorkerID) {
 		t.Errorf("重新分配的 WorkerID 应该在有效范围内，实际值: %d", newWorkerID)
 	}
 
@@ -442,8 +443,10 @@ func TestRedisGenerator_ReleaseWithRedisStateCheck(t *testing.T) {
 func TestRedisGenerator_ReleaseAndReuse(t *testing.T) {
 	client, cleanup := setupTestRedis(t)
 	defer cleanup()
+	workerBits := uint(2)
+	maxID := int64(3)
 
-	gen, err := NewRedisGenerator(client, "test-cluster", WithMaxWorkerID(2))
+	gen, err := NewRedisGenerator(client, "test-cluster", WithWorkerBits(workerBits))
 	if err != nil {
 		t.Fatalf("创建 RedisGenerator 失败: %v", err)
 	}
@@ -473,8 +476,8 @@ func TestRedisGenerator_ReleaseAndReuse(t *testing.T) {
 	}
 
 	// 验证获取到的 ID 有效
-	if workerID3 <= 0 || workerID3 > 2 {
-		t.Errorf("重新获取的 WorkerID 应该在 1-2 范围内, 实际值: %d", workerID3)
+	if workerID3 < 0 || workerID3 > maxID {
+		t.Errorf("重新获取的 WorkerID 应该在 0-%d 范围内, 实际值: %d", maxID, workerID3)
 	}
 
 	// Token 应该不同
@@ -487,7 +490,7 @@ func TestRedisGenerator_ConcurrentAccess(t *testing.T) {
 	client, cleanup := setupTestRedis(t)
 	defer cleanup()
 
-	gen, err := NewRedisGenerator(client, "test-cluster", WithMaxWorkerID(10))
+	gen, err := NewRedisGenerator(client, "test-cluster", WithWorkerBits(10))
 	if err != nil {
 		t.Fatalf("创建 RedisGenerator 失败: %v", err)
 	}
@@ -540,11 +543,12 @@ func TestRedisGenerator_WithOptions(t *testing.T) {
 	client, cleanup := setupTestRedis(t)
 	defer cleanup()
 
-	maxWorkerID := uint32(50)
+	workerBits := uint(10)
+	maxWorkerID := uint32(1023)
 	maxLeaseTime := 10 * time.Minute
 
 	gen, err := NewRedisGenerator(client, "test-cluster",
-		WithMaxWorkerID(maxWorkerID),
+		WithWorkerBits(workerBits),
 		WithMaxLeaseTime(maxLeaseTime))
 	if err != nil {
 		t.Fatalf("创建 RedisGenerator 失败: %v", err)
@@ -565,7 +569,7 @@ func TestRedisGenerator_WithOptions(t *testing.T) {
 		t.Fatalf("GetID() 失败: %v", err)
 	}
 
-	if workerID <= 0 || workerID > int64(maxWorkerID) {
+	if workerID < 0 || workerID > int64(maxWorkerID) {
 		t.Errorf("WorkerID 应该在 1-%d 范围内, 实际值: %d", maxWorkerID, workerID)
 	}
 }
@@ -599,8 +603,8 @@ func TestRedisGenerator_RenewHashExpiration(t *testing.T) {
 
 	// 期望的完整 TTL 值（lease * 3 = 15 秒）
 	expectedFullTTL := time.Duration(gen.leaseSeconds*3) * time.Second
-	
-	t.Logf("初始 TTL: %v, 期望完整 TTL: %v", initialTTL, expectedFullTTL)
+
+	// t.Logf("初始 TTL: %v, 期望完整 TTL: %v", initialTTL, expectedFullTTL)
 
 	// 手动设置一个较短的 TTL 来模拟接近过期的场景
 	shortTTL := 3 * time.Second
@@ -619,7 +623,7 @@ func TestRedisGenerator_RenewHashExpiration(t *testing.T) {
 		t.Fatalf("TTL 应该被设置为较短的值，期望约 %v，实际: %v", shortTTL, beforeRenewTTL)
 	}
 
-	t.Logf("手动设置短 TTL 后: %v", beforeRenewTTL)
+	// t.Logf("手动设置短 TTL 后: %v", beforeRenewTTL)
 
 	// 执行续期
 	err = gen.Renew(workerID, token)
@@ -659,6 +663,103 @@ func TestRedisGenerator_RenewHashExpiration(t *testing.T) {
 		t.Fatalf("续期后 token 数据不应该为空")
 	}
 
-	t.Logf("续期验证成功 - 续期前: %v, 续期后: %v, TTL 增加: %v, Hash 数据存在: %v", 
-		beforeRenewTTL, afterRenewTTL, ttlIncrease, tokenData != "")
+	// t.Logf("续期验证成功 - 续期前: %v, 续期后: %v, TTL 增加: %v, Hash 数据存在: %v",
+	// 	beforeRenewTTL, afterRenewTTL, ttlIncrease, tokenData != "")
+}
+
+func TestWithWorkerBits(t *testing.T) {
+	workerBits := map[uint]uint32{
+		4:  15,
+		6:  63,
+		8:  255,
+		10: 1023,
+		12: 4095,
+	}
+	s := miniredis.RunT(t)
+	defer s.Close()
+	client := redis.NewClient(&redis.Options{
+		Addr: s.Addr(),
+	})
+	defer client.Close()
+
+	for b, m := range workerBits {
+		// 为每个测试用例创建独立的集群名称，避免数据冲突
+		clusterName := fmt.Sprintf("test-cluster-%d", b)
+
+		g, err := NewRedisGenerator(client, clusterName, WithWorkerBits(b))
+		if err != nil {
+			t.Errorf("创建 RedisGenerator 失败: %v", err)
+			continue
+		}
+
+		if g.maxWorkerID == 0 {
+			t.Errorf("maxWorkerID 应该大于 0, 实际值: %d", g.maxWorkerID)
+		}
+		if g.maxWorkerID != m {
+			t.Errorf("maxWorkerID 应该为 %d, 实际值: %d", m, g.maxWorkerID)
+		}
+
+		// 检查 Redis 中的 ID 范围
+		ctx := context.Background()
+		idsKey := fmt.Sprintf("{workerid:cluster:%s}:ids", clusterName)
+
+		// 验证 ZSet 中的成员总数
+		totalCount, err := client.ZCard(ctx, idsKey).Result()
+		if err != nil {
+			t.Errorf("获取 Redis ZSet 成员总数失败: %v", err)
+			continue
+		}
+
+		expectedCount := int64(m) + 1 // 从 0 到 maxWorkerID，总共 maxWorkerID + 1 个
+		if totalCount != expectedCount {
+			t.Errorf("WorkerBits=%d: Redis 中的成员数量应该为 %d, 实际值: %d",
+				b, expectedCount, totalCount)
+			continue
+		}
+
+		// 验证最小的 WorkerID (0) 存在
+		exists, err := client.ZScore(ctx, idsKey, "0").Result()
+		if err != nil {
+			t.Errorf("WorkerBits=%d: 最小 WorkerID '0' 应该存在于 Redis 中: %v", b, err)
+			continue
+		}
+		if exists != 0 {
+			t.Errorf("WorkerBits=%d: WorkerID '0' 的初始分数应该是 0, 实际值: %f", b, exists)
+		}
+
+		// 验证最大的 WorkerID (maxWorkerID) 存在
+		maxWorkerIDStr := strconv.Itoa(int(m))
+		exists, err = client.ZScore(ctx, idsKey, maxWorkerIDStr).Result()
+		if err != nil {
+			t.Errorf("WorkerBits=%d: 最大 WorkerID '%s' 应该存在于 Redis 中: %v", b, maxWorkerIDStr, err)
+			continue
+		}
+		if exists != 0 {
+			t.Errorf("WorkerBits=%d: WorkerID '%s' 的初始分数应该是 0, 实际值: %f", b, maxWorkerIDStr, exists)
+		}
+
+		// 验证超出范围的 WorkerID 不存在
+		outOfRangeID := strconv.Itoa(int(m) + 1)
+		_, err = client.ZScore(ctx, idsKey, outOfRangeID).Result()
+		if !errors.Is(err, redis.Nil) {
+			t.Errorf("WorkerBits=%d: 超出范围的 WorkerID '%s' 不应该存在于 Redis 中", b, outOfRangeID)
+		}
+
+		// 抽样验证中间的一些 WorkerID 存在且分数为 0
+		sampleIDs := []int{1, int(m) / 4, int(m) / 2, int(m) * 3 / 4}
+		for _, sampleID := range sampleIDs {
+			if sampleID <= int(m) {
+				sampleIDStr := strconv.Itoa(sampleID)
+				score, err := client.ZScore(ctx, idsKey, sampleIDStr).Result()
+				if err != nil {
+					t.Errorf("WorkerBits=%d: WorkerID '%s' 应该存在于 Redis 中: %v", b, sampleIDStr, err)
+					continue
+				}
+				if score != 0 {
+					t.Errorf("WorkerBits=%d: WorkerID '%s' 的初始分数应该是 0, 实际值: %f",
+						b, sampleIDStr, score)
+				}
+			}
+		}
+	}
 }

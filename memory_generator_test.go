@@ -17,7 +17,7 @@ func TestNewMemoryGenerator(t *testing.T) {
 		},
 		{
 			name:    "自定义最大WorkerID",
-			options: []Option{WithMaxWorkerID(100)},
+			options: []Option{WithWorkerBits(4)},
 			wantErr: false,
 		},
 	}
@@ -139,8 +139,9 @@ func TestMemoryGenerator_Release(t *testing.T) {
 }
 
 func TestMemoryGenerator_WithMaxWorkerID(t *testing.T) {
-	maxWorkerID := uint32(50)
-	gen := NewMemoryGenerator(WithMaxWorkerID(maxWorkerID))
+	workerBits := uint(6)
+	maxWorkerID := uint32(63)
+	gen := NewMemoryGenerator(WithWorkerBits(workerBits))
 
 	// 验证生成的 WorkerID 在指定范围内
 	if gen.workerID <= 0 || gen.workerID > int64(maxWorkerID) {

@@ -12,16 +12,16 @@ type MemoryGenerator struct {
 
 func NewMemoryGenerator(options ...Option) *MemoryGenerator {
 	opts := &generatorOptions{
-		maxWorkerID: 1000,
+		maxWorkerID: 511,
 	}
 	for _, option := range options {
 		option(opts)
 	}
 	maxId := opts.maxWorkerID
-	if maxId == 0 {
-		maxId = 32
+	if maxId <= 0 {
+		maxId = 511
 	}
-	randomUint32 := uint32(rand.N(uint64(maxId-1))) + 1
+	randomUint32 := uint32(rand.N(uint64(maxId))) + 1
 
 	return &MemoryGenerator{
 		workerID: int64(randomUint32),

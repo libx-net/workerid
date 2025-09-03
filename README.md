@@ -44,7 +44,7 @@ func main() {
     generator, err := workerid.NewRedisGenerator(
         client,
         "mycluster", // Cluster name for distinguishing different clusters
-        workerid.WithMaxWorkerID(32), // Optional, maximum worker count, default 1000
+        workerid.WithWorkerBits(8), // Optional, maxWorkerID = 1 << workerBits - 1, default maxWorkerID is 511
         workerid.WithMaxLeaseTime(time.Minute*5), // Optional, lease time, default 5 minutes
     )
     if err != nil {
@@ -95,7 +95,7 @@ import (
 
 func main() {
     generator := workerid.NewMemoryGenerator(
-        workerid.WithMaxWorkerID(100), // Optional, maximum worker count, default 1000
+        workerid.WithWorkerBits(9), // Optional, workerIDBits, default maxWorkerID is 511
         workerid.WithMaxLeaseTime(time.Minute*2), // Optional, lease time, default 5 minutes
     )
     
@@ -152,8 +152,8 @@ func NewMemoryGenerator(opts ...Option) *MemoryGenerator
 ### Options
 
 ```go
-// WithMaxWorkerID sets the maximum number of worker IDs
-func WithMaxWorkerID(maxWorkers uint32) Option
+// WithWorkerBits sets bits for store workerID
+func WithWorkerBits(workerBits uint) Option
 
 // WithMaxLeaseTime sets the maximum lease duration
 func WithMaxLeaseTime(maxLeaseTime time.Duration) Option
@@ -174,7 +174,7 @@ var (
 
 ## Performance Considerations
 
-- **Redis**: Suitable for high-concurrency scenarios, supports distributed deployment, uses distributed locks to prevent two workers from acquiring the same worker ID simultaneously. Recommended maximum worker count is 1000.
+- **Redis**: Suitable for high-concurrency scenarios, supports distributed deployment, uses distributed locks to prevent two workers from acquiring the same worker ID simultaneously. Recommended workerBits is 10(max 1023).
 - **Memory**: Highest performance, suitable for testing environments.
 
 ## Implementation Details
