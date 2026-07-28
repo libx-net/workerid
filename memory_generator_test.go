@@ -11,12 +11,12 @@ func TestNewMemoryGenerator(t *testing.T) {
 		wantErr bool
 	}{
 		{
-			name:    "默认配置",
+			name:    "default configuration",
 			options: nil,
 			wantErr: false,
 		},
 		{
-			name:    "自定义最大WorkerID",
+			name:    "custom max WorkerID",
 			options: []Option{WithWorkerBits(4)},
 			wantErr: false,
 		},
@@ -26,18 +26,18 @@ func TestNewMemoryGenerator(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			gen := NewMemoryGenerator(tt.options...)
 			if gen == nil {
-				t.Error("NewMemoryGenerator() 返回 nil")
+				t.Error("NewMemoryGenerator() returned nil")
 				return
 			}
 
-			// 验证生成的 WorkerID 在有效范围内
+			// Verify generated WorkerID is within valid range
 			if gen.workerID <= 0 {
-				t.Errorf("WorkerID 应该大于 0, 实际值: %d", gen.workerID)
+				t.Errorf("WorkerID should be > 0, got: %d", gen.workerID)
 			}
 
-			// 验证 Token 不为空且长度正确
+			// Verify Token is non-empty and has correct length
 			if len(gen.token) != 22 {
-				t.Errorf("Token 长度应该为 22, 实际长度: %d", len(gen.token))
+				t.Errorf("Token length should be 22, got: %d", len(gen.token))
 			}
 		})
 	}
@@ -48,15 +48,15 @@ func TestMemoryGenerator_GetID(t *testing.T) {
 
 	workerID, token, err := gen.GetID()
 	if err != nil {
-		t.Errorf("GetID() 返回错误: %v", err)
+		t.Errorf("GetID() returned error: %v", err)
 	}
 
 	if workerID != gen.workerID {
-		t.Errorf("GetID() 返回的 WorkerID = %d, 期望 %d", workerID, gen.workerID)
+		t.Errorf("GetID() returned WorkerID = %d, want %d", workerID, gen.workerID)
 	}
 
 	if token != gen.token {
-		t.Errorf("GetID() 返回的 Token = %s, 期望 %s", token, gen.token)
+		t.Errorf("GetID() returned Token = %s, want %s", token, gen.token)
 	}
 }
 
@@ -70,19 +70,19 @@ func TestMemoryGenerator_Renew(t *testing.T) {
 		wantErr  error
 	}{
 		{
-			name:     "正确的WorkerID和Token",
+			name:     "correct WorkerID and Token",
 			workerID: gen.workerID,
 			token:    gen.token,
 			wantErr:  nil,
 		},
 		{
-			name:     "错误的WorkerID",
+			name:     "wrong WorkerID",
 			workerID: gen.workerID + 1,
 			token:    gen.token,
 			wantErr:  ErrInvalidWorkerID,
 		},
 		{
-			name:     "错误的Token",
+			name:     "wrong Token",
 			workerID: gen.workerID,
 			token:    "invalid_token",
 			wantErr:  ErrTokenMismatch,
@@ -93,7 +93,7 @@ func TestMemoryGenerator_Renew(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			err := gen.Renew(tt.workerID, tt.token)
 			if err != tt.wantErr {
-				t.Errorf("Renew() 错误 = %v, 期望错误 %v", err, tt.wantErr)
+				t.Errorf("Renew() error = %v, want error %v", err, tt.wantErr)
 			}
 		})
 	}
@@ -109,19 +109,19 @@ func TestMemoryGenerator_Release(t *testing.T) {
 		wantErr  error
 	}{
 		{
-			name:     "正确的WorkerID和Token",
+			name:     "correct WorkerID and Token",
 			workerID: gen.workerID,
 			token:    gen.token,
 			wantErr:  nil,
 		},
 		{
-			name:     "错误的WorkerID",
+			name:     "wrong WorkerID",
 			workerID: gen.workerID + 1,
 			token:    gen.token,
 			wantErr:  ErrInvalidWorkerID,
 		},
 		{
-			name:     "错误的Token",
+			name:     "wrong Token",
 			workerID: gen.workerID,
 			token:    "invalid_token",
 			wantErr:  ErrTokenMismatch,
@@ -132,7 +132,7 @@ func TestMemoryGenerator_Release(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			err := gen.Release(tt.workerID, tt.token)
 			if err != tt.wantErr {
-				t.Errorf("Release() 错误 = %v, 期望错误 %v", err, tt.wantErr)
+				t.Errorf("Release() error = %v, want error %v", err, tt.wantErr)
 			}
 		})
 	}
@@ -143,23 +143,23 @@ func TestMemoryGenerator_WithMaxWorkerID(t *testing.T) {
 	maxWorkerID := uint32(63)
 	gen := NewMemoryGenerator(WithWorkerBits(workerBits))
 
-	// 验证生成的 WorkerID 在指定范围内
+	// Verify generated WorkerID is within specified range
 	if gen.workerID <= 0 || gen.workerID > int64(maxWorkerID) {
-		t.Errorf("WorkerID 应该在 1-%d 范围内, 实际值: %d", maxWorkerID, gen.workerID)
+		t.Errorf("WorkerID should be in range 1-%d, got: %d", maxWorkerID, gen.workerID)
 	}
 }
 
 func TestMemoryGenerator_MultipleInstances(t *testing.T) {
-	// 测试多个实例生成不同的 Token
+	// Test that multiple instances generate different Tokens
 	gen1 := NewMemoryGenerator()
 	gen2 := NewMemoryGenerator()
 
 	if gen1.token == gen2.token {
-		t.Error("不同实例应该生成不同的 Token")
+		t.Error("different instances should generate different Tokens")
 	}
 
-	// WorkerID 可能相同（随机生成），但 Token 应该不同
+	// WorkerID may be the same (random), but Token should differ
 	if gen1.token == gen2.token {
-		t.Error("不同实例的 Token 不应该相同")
+		t.Error("Tokens from different instances should not be the same")
 	}
 }

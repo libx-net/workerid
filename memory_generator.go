@@ -4,7 +4,7 @@ import (
 	"math/rand/v2"
 )
 
-// MemoryGenerator 单机环境下的简化实现
+// MemoryGenerator is a simplified single-process implementation.
 type MemoryGenerator struct {
 	workerID int64
 	token    string
@@ -40,7 +40,7 @@ func (g *MemoryGenerator) Renew(workerID int64, token string) error {
 	if token != g.token {
 		return ErrTokenMismatch
 	}
-	return nil // 单机环境无需续期
+	return nil // no-op in single-process mode
 }
 
 func (g *MemoryGenerator) Release(workerID int64, token string) error {
@@ -50,5 +50,5 @@ func (g *MemoryGenerator) Release(workerID int64, token string) error {
 	if token != g.token {
 		return ErrTokenMismatch
 	}
-	return nil // 单机环境无需释放
+	return nil // no-op in single-process mode
 }

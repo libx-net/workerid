@@ -7,11 +7,11 @@ import (
 )
 
 type Generator interface {
-	// GetID 获取worker ID,返回 worker ID 和 token
+	// GetID acquires a worker ID and returns the worker ID and token.
 	GetID() (int64, string, error)
-	// Renew 续期 worker ID
+	// Renew renews the lease of a worker ID.
 	Renew(workerID int64, token string) error
-	// Release 主动释放 worker ID
+	// Release actively releases a worker ID.
 	Release(workerID int64, token string) error
 }
 

@@ -14,31 +14,36 @@ import (
 )
 
 func main() {
-	// 创建Redis客户端
+	// Create Redis client
 	client := redis.NewClient(&redis.Options{
-		Addr:     "localhost:6379", // Redis服务器地址
-		Password: "",               // 密码
-		DB:       0,                // 数据库编号
+		Addr:     "localhost:6379", // Redis server address
+		Password: "",               // Password
+		DB:       0,                // Database number
 	})
 
-	// 测试Redis连接
+	// Test Redis connection
 	ctx := context.Background()
 	if err := client.Ping(ctx).Err(); err != nil {
 		log.Fatalf("Failed to connect to Redis: %v", err)
 	}
 
-	// 创建RedisGenerator
+	// Adapt go-redis client to RedisDoer
+	doer := workerid.RedisFunc(func(ctx context.Context, args ...any) (any, error) {
+		return client.Do(ctx, args...).Result()
+	})
+
+	// Create RedisGenerator
 	generator, err := workerid.NewRedisGenerator(
-		client,
-		"my-app-cluster",             // 集群名称
-		workerid.WithMaxWorkerID(50), // 最大50个worker
-		workerid.WithMaxLeaseTime(2*time.Minute), // 2分钟租约
+		doer,
+		"my-app-cluster",                       // Cluster name
+		workerid.WithWorkerBits(6),             // maxWorkerID = 63
+		workerid.WithMaxLeaseTime(2*time.Minute), // 2-minute lease
 	)
 	if err != nil {
 		log.Fatalf("Failed to create RedisGenerator: %v", err)
 	}
 
-	// 获取worker ID
+	// Acquire worker ID
 	workerID, token, err := generator.GetID()
 	if err != nil {
 		log.Fatalf("Failed to get worker ID: %v", err)
@@ -47,15 +52,15 @@ func main() {
 	fmt.Printf("✅ Acquired worker ID: %d\n", workerID)
 	fmt.Printf("🔑 Token: %s\n", token)
 
-	// 设置信号处理，优雅退出
+	// Signal handling for graceful shutdown
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
-	// 创建续约定时器
-	renewTicker := time.NewTicker(30 * time.Second) // 每30秒续约一次
+	// Renewal ticker
+	renewTicker := time.NewTicker(30 * time.Second) // renew every 30 seconds
 	defer renewTicker.Stop()
 
-	// 主循环
+	// Main loop
 	running := true
 	for running {
 		select {
@@ -64,7 +69,7 @@ func main() {
 			running = false
 
 		case <-renewTicker.C:
-			// 续约worker ID
+			// Renew worker ID
 			if err := generator.Renew(workerID, token); err != nil {
 				log.Printf("⚠️ Failed to renew worker ID: %v", err)
 				running = false
@@ -74,7 +79,7 @@ func main() {
 		}
 	}
 
-	// 释放worker ID
+	// Release worker ID
 	if err := generator.Release(workerID, token); err != nil {
 		log.Printf("⚠️ Failed to release worker ID: %v", err)
 	} else {
