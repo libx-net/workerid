@@ -47,12 +47,15 @@ func (c *client) BeginTx(ctx context.Context) (workerid.SQLTx, error) {
 	return &tx{tx: stx}, nil
 }
 
+// bun.Tx.QueryRowContext/ExecContext format() interpolates "?" then executes
+// with no driver args. PostgresDialect uses $n, so parameters would never
+// reach the driver. Call the embedded *sql.Tx so placeholders stay bound.
 func (t *tx) QueryRow(ctx context.Context, query string, args ...any) workerid.SQLRow {
-	return &row{row: t.tx.QueryRowContext(ctx, query, args...)}
+	return &row{row: t.tx.Tx.QueryRowContext(ctx, query, args...)}
 }
 
 func (t *tx) Exec(ctx context.Context, query string, args ...any) error {
-	_, err := t.tx.ExecContext(ctx, query, args...)
+	_, err := t.tx.Tx.ExecContext(ctx, query, args...)
 	return err
 }
 
