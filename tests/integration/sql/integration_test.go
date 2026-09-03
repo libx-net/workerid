@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -103,28 +104,13 @@ func TestIntegrationMySQL(t *testing.T) {
 		t.Fatalf("ping: %v", err)
 	}
 
-	if _, err := db.Exec(workerid.MySQLSchema); err != nil {
-		// MySQL may not support CREATE INDEX IF NOT EXISTS on older servers;
-		// fall back to splitting statements from a minimal inline schema.
-		for _, stmt := range []string{
-			`CREATE TABLE IF NOT EXISTS workerid_clusters (
-				cluster VARCHAR(255) PRIMARY KEY,
-				max_worker_id INT NOT NULL,
-				created_at TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6)
-			)`,
-			`CREATE TABLE IF NOT EXISTS workerid_leases (
-				cluster VARCHAR(255) NOT NULL,
-				worker_id INT NOT NULL,
-				token VARCHAR(64) NULL,
-				expire_at TIMESTAMP(6) NOT NULL DEFAULT '1970-01-01 00:00:00.000000',
-				PRIMARY KEY (cluster, worker_id)
-			)`,
-		} {
-			if _, err2 := db.Exec(stmt); err2 != nil {
-				t.Fatalf("schema: %v / %v", err, err2)
-			}
-		}
+	// Reproduce the reported sql_mode that rejected TIMESTAMP '1970-01-01 00:00:00'.
+	if _, err := db.Exec("SET SESSION sql_mode = 'STRICT_TRANS_TABLES,NO_ZERO_DATE,NO_ZERO_IN_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION'"); err != nil {
+		t.Fatalf("sql_mode: %v", err)
 	}
+
+	applyMySQLSchema(t, db)
+	applyMySQLSchema(t, db) // retry must be a no-op (DDL is not transactional)
 
 	client := workerid.NewDatabaseSQLClient(db)
 	cluster := "it-mysql-" + time.Now().Format("150405")
@@ -136,6 +122,23 @@ func TestIntegrationMySQL(t *testing.T) {
 		if err2 := workerid.InitializeSQLCluster(context.Background(), client, dialect, cluster, opts...); err2 != nil {
 			t.Fatalf("init: %v / %v", err, err2)
 		}
+	}
+
+	var n int
+	if err := db.QueryRow("SELECT COUNT(*) FROM workerid_leases WHERE cluster = ?", cluster).Scan(&n); err != nil {
+		t.Fatalf("count leases: %v", err)
+	}
+	const want = 8 // WithWorkerBits(3) => worker IDs 0..7
+	if n != want {
+		t.Fatalf("seeded %d leases, want %d", n, want)
+	}
+
+	var expireAt string
+	if err := db.QueryRow("SELECT CAST(expire_at AS CHAR) FROM workerid_leases WHERE cluster = ? AND worker_id = 0", cluster).Scan(&expireAt); err != nil {
+		t.Fatalf("expire_at: %v", err)
+	}
+	if !strings.HasPrefix(expireAt, "1970-01-01 00:00:00") {
+		t.Fatalf("unleased expire_at = %q, want Unix-epoch DATETIME", expireAt)
 	}
 
 	gen, err := workerid.NewSQLGenerator(client, dialect, cluster, opts...)
@@ -152,6 +155,37 @@ func TestIntegrationMySQL(t *testing.T) {
 	if err := gen.Release(id, token); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func applyMySQLSchema(t *testing.T, db *sql.DB) {
+	t.Helper()
+	for _, stmt := range splitSQLStatements(workerid.MySQLSchema) {
+		if _, err := db.Exec(stmt); err != nil {
+			t.Fatalf("schema %q: %v", stmt, err)
+		}
+	}
+}
+
+func splitSQLStatements(schema string) []string {
+	var out []string
+	for _, stmt := range strings.Split(schema, ";") {
+		if sqlStatementIsEmpty(stmt) {
+			continue
+		}
+		out = append(out, strings.TrimSpace(stmt))
+	}
+	return out
+}
+
+func sqlStatementIsEmpty(stmt string) bool {
+	for _, line := range strings.Split(stmt, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "--") {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func TestIntegrationSQLite(t *testing.T) {

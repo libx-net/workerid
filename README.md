@@ -133,6 +133,20 @@ You must:
 2. Call `InitializeSQLCluster` once to seed the ID pool.
 3. Create a generator with `NewSQLGenerator`.
 
+`CREATE TABLE IF NOT EXISTS` in `MySQLSchema` does **not** change an existing table. If `workerid_leases.expire_at` is still `TIMESTAMP(6)` (applied under a relaxed `sql_mode`), convert it before `InitializeSQLCluster` — seed/release write Unix epoch, which is also illegal as a `TIMESTAMP` value under `STRICT_TRANS_TABLES,NO_ZERO_DATE`:
+
+```sql
+ALTER TABLE workerid_leases
+  MODIFY expire_at DATETIME(6) NOT NULL DEFAULT '1970-01-01 00:00:00.000000';
+```
+
+If `workerid_leases_available_idx` is missing:
+
+```sql
+ALTER TABLE workerid_leases
+  ADD INDEX workerid_leases_available_idx (cluster, expire_at, worker_id);
+```
+
 Supported dialects:
 
 | Dialect | Constructor | Concurrency notes |

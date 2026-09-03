@@ -12,6 +12,11 @@ import (
 //go:embed schema_mysql.sql
 var MySQLSchema string
 
+// mysqlUnleasedExpireAt is the sentinel written to expire_at for a free slot.
+// DATETIME(6) accepts Unix epoch; TIMESTAMP does not (valid range starts at
+// 1970-01-01 00:00:01 UTC), so schema_mysql.sql must keep expire_at as DATETIME.
+const mysqlUnleasedExpireAt = "1970-01-01 00:00:00.000000"
+
 type mysqlDialect struct {
 	skipLocked bool
 }
@@ -58,7 +63,7 @@ func (d *mysqlDialect) SeedLeases(ctx context.Context, tx SQLTx, cluster string,
 			if id > start {
 				query += ","
 			}
-			query += "(?, ?, NULL, '1970-01-01 00:00:00.000000')"
+			query += "(?, ?, NULL, '" + mysqlUnleasedExpireAt + "')"
 			args = append(args, cluster, id)
 		}
 		if err := tx.Exec(ctx, query, args...); err != nil {
@@ -133,7 +138,7 @@ WHERE cluster = ? AND worker_id = ?
 func (d *mysqlDialect) Release(ctx context.Context, tx SQLTx, cluster string, workerID int64) error {
 	return tx.Exec(ctx, `
 UPDATE workerid_leases
-SET token = NULL, expire_at = '1970-01-01 00:00:00.000000'
+SET token = NULL, expire_at = '`+mysqlUnleasedExpireAt+`'
 WHERE cluster = ? AND worker_id = ?
 `, cluster, workerID)
 }
