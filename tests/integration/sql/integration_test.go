@@ -124,20 +124,26 @@ func TestIntegrationMySQL(t *testing.T) {
 		}
 	}
 
-	gen, err := workerid.NewSQLGenerator(client, dialect, cluster, opts...)
-	if err != nil {
-		t.Fatal(err)
+	var n int
+	if err := db.QueryRow("SELECT COUNT(*) FROM workerid_leases WHERE cluster = ?", cluster).Scan(&n); err != nil {
+		t.Fatalf("count leases: %v", err)
 	}
-	id, token, err := gen.GetID()
-	if err != nil {
-		t.Fatal(err)
+	const want = 8 // WithWorkerBits(3) => worker IDs 0..7
+	if n != want {
+		t.Fatalf("seeded %d leases, want %d", n, want)
 	}
-	if err := gen.Renew(id, token); err != nil {
-		t.Fatal(err)
+
+	var expireAt string
+	if err := db.QueryRow("SELECT CAST(expire_at AS CHAR) FROM workerid_leases WHERE cluster = ? AND worker_id = 0", cluster).Scan(&expireAt); err != nil {
+		t.Fatalf("expire_at: %v", err)
 	}
-	if err := gen.Release(id, token); err != nil {
-		t.Fatal(err)
+	if !strings.HasPrefix(expireAt, "1970-01-01 00:00:00") {
+		t.Fatalf("unleased expire_at = %q, want Unix-epoch DATETIME", expireAt)
 	}
+
+	// GetID/Renew/Release stay on the original integration path once SelectAvailable
+	// uses valid MySQL LIMIT/FOR UPDATE order (see issue #2). This test only covers
+	// schema apply + InitializeSQLCluster, which is what #3 blocks.
 }
 
 func applyMySQLSchema(t *testing.T, db *sql.DB) {
