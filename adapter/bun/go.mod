@@ -4,7 +4,7 @@ go 1.22.0
 
 require (
 	github.com/uptrace/bun v1.2.11
-	libx.net/workerid v0.0.0
+	libx.net/workerid v0.3.0
 )
 
 require (

@@ -4,7 +4,7 @@ go 1.22
 
 require (
 	gorm.io/gorm v1.25.12
-	libx.net/workerid v0.0.0
+	libx.net/workerid v0.3.0
 )
 
 require (
