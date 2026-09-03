@@ -5,17 +5,27 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
-	"strings"
 	"time"
-
-	"github.com/go-redis/redis/v8"
 )
+
+// RedisDoer is a driver-agnostic Redis command executor.
+// Users can adapt go-redis v7/v8/v9 (or any other client) with a small closure.
+type RedisDoer interface {
+	Do(ctx context.Context, args ...any) (any, error)
+}
+
+// RedisFunc lets any function implement RedisDoer.
+type RedisFunc func(ctx context.Context, args ...any) (any, error)
+
+func (f RedisFunc) Do(ctx context.Context, args ...any) (any, error) {
+	return f(ctx, args...)
+}
 
 type RedisGenerator struct {
 	cluster      string
 	maxWorkerID  uint32
 	leaseSeconds int
-	redisClient  *redis.Client
+	redisClient  RedisDoer
 	ctx          context.Context
 	clockSync    bool
 	lockKey      string
@@ -24,33 +34,28 @@ type RedisGenerator struct {
 
 var _ Generator = (*RedisGenerator)(nil)
 
-// NewRedisGenerator 创建 RedisGenerator 实例
-func NewRedisGenerator(redisClient *redis.Client, cluster string, options ...Option) (*RedisGenerator, error) {
-	opts := &generatorOptions{
-		cluster:      cluster,
-		maxWorkerID:  511, // 默认 512 个 WorkerID，最大 WorkerID 为 511
-		maxLeaseTime: 5 * time.Minute,
+// NewRedisGenerator creates a RedisGenerator instance.
+// client must implement RedisDoer; adapt go-redis with RedisFunc, e.g.:
+//
+//	doer := workerid.RedisFunc(func(ctx context.Context, args ...any) (any, error) {
+//		return client.Do(ctx, args...).Result()
+//	})
+func NewRedisGenerator(redisClient RedisDoer, cluster string, options ...Option) (*RedisGenerator, error) {
+	if redisClient == nil {
+		return nil, errors.New("redis client is nil")
 	}
-	for _, o := range options {
-		o(opts)
-	}
-	if opts.cluster == "" {
-		return nil, errors.New("cluster is empty")
-	}
-	if opts.maxLeaseTime <= 0 {
-		opts.maxLeaseTime = 5 * time.Minute
-	}
-	if opts.maxWorkerID <= 0 {
-		opts.maxWorkerID = 511
+	cfg, err := ResolveConfig(cluster, options...)
+	if err != nil {
+		return nil, err
 	}
 
 	allocator := &RedisGenerator{
-		cluster:      opts.cluster,
-		maxWorkerID:  opts.maxWorkerID,
-		leaseSeconds: int(opts.maxLeaseTime.Seconds()),
+		cluster:      cfg.Cluster,
+		maxWorkerID:  cfg.MaxWorkerID,
+		leaseSeconds: int(cfg.MaxLeaseTime.Seconds()),
 		redisClient:  redisClient,
 		ctx:          context.Background(),
-		lockKey:      fmt.Sprintf("{workerid:cluster:%s}:lock", opts.cluster),
+		lockKey:      fmt.Sprintf("{workerid:cluster:%s}:lock", cfg.Cluster),
 		lockVal:      generateToken(),
 	}
 
@@ -61,68 +66,116 @@ func NewRedisGenerator(redisClient *redis.Client, cluster string, options ...Opt
 	return allocator, nil
 }
 
+func toInt64(v any) (int64, error) {
+	switch x := v.(type) {
+	case int64:
+		return x, nil
+	case int:
+		return int64(x), nil
+	case int32:
+		return int64(x), nil
+	case float64:
+		return int64(x), nil
+	case string:
+		return strconv.ParseInt(x, 10, 64)
+	case []byte:
+		return strconv.ParseInt(string(x), 10, 64)
+	default:
+		return 0, fmt.Errorf("unexpected type %T", v)
+	}
+}
+
+func toString(v any) (string, error) {
+	switch x := v.(type) {
+	case string:
+		return x, nil
+	case []byte:
+		return string(x), nil
+	default:
+		return "", fmt.Errorf("unexpected type %T", v)
+	}
+}
+
+func (g *RedisGenerator) eval(script string, keys []string, args ...any) (any, error) {
+	cmdArgs := make([]any, 0, 3+len(keys)+len(args))
+	cmdArgs = append(cmdArgs, "EVAL", script, len(keys))
+	for _, k := range keys {
+		cmdArgs = append(cmdArgs, k)
+	}
+	cmdArgs = append(cmdArgs, args...)
+	return g.redisClient.Do(g.ctx, cmdArgs...)
+}
+
 func (g *RedisGenerator) getCurrentTime() (int64, error) {
 	if g.clockSync {
-		t, err := g.redisClient.Time(g.ctx).Result()
+		reply, err := g.redisClient.Do(g.ctx, "TIME")
 		if err != nil {
 			return 0, err
 		}
-		return t.Unix(), nil
+		arr, ok := reply.([]any)
+		if !ok || len(arr) == 0 {
+			return 0, fmt.Errorf("unexpected TIME reply type %T", reply)
+		}
+		sec, err := toInt64(arr[0])
+		if err != nil {
+			return 0, fmt.Errorf("parse TIME reply: %w", err)
+		}
+		return sec, nil
 	}
 	return time.Now().Unix(), nil
 }
 
+var initIDsScript = `
+	local key = KEYS[1]
+	local maxID = tonumber(ARGV[1])
+	if redis.call('ZCARD', key) > 0 then
+		return 0
+	end
+	for i = 0, maxID do
+		redis.call('ZADD', key, 0, tostring(i))
+	end
+	return 1
+`
+
 func (g *RedisGenerator) initAvailableIDs() error {
-	key := g.getIDsKey()
-	// 如果 key 已经存在，则直接返回
-	if n, err := g.redisClient.ZCard(g.ctx, key).Result(); err == nil && n > 0 {
-		return nil
-	}
-	pipe := g.redisClient.Pipeline()
-	for i := 0; i <= int(g.maxWorkerID); i++ {
-		pipe.ZAdd(g.ctx, key, &redis.Z{
-			Score:  0,
-			Member: strconv.Itoa(i),
-		})
-	}
-	_, err := pipe.Exec(g.ctx)
+	_, err := g.eval(initIDsScript, []string{g.getIDsKey()}, g.maxWorkerID)
 	return err
 }
 
-// getIDsKey 获取存储 WorkerID 的 Sorted Set 键
+// getIDsKey returns the Sorted Set key for WorkerIDs
 func (g *RedisGenerator) getIDsKey() string {
 	return fmt.Sprintf("{workerid:cluster:%s}:ids", g.cluster)
 }
 
-// getTokenKey 获取 Token 存储键
+// getTokenKey returns the Token storage key
 func (g *RedisGenerator) getTokenKey() string {
 	return fmt.Sprintf("{workerid:cluster:%s}:tokens", g.cluster)
 }
 
-var getIDScript = redis.NewScript(`
+var getIDScript = `
 	local key = KEYS[1]
 	local now = tonumber(ARGV[1])
 	local lease = tonumber(ARGV[2])
 
-	-- 查找最小可用 ID
+	-- Find the smallest available ID
 	local ids = redis.call('ZRANGEBYSCORE', key, '-inf', now, 'WITHSCORES', 'LIMIT', 0, 1)
-	if #ids == 0 then return nil end
+	if #ids == 0 then return -1 end
 
 	local workerID = ids[1]
 	local newExpire = now + lease
 
-	-- 更新 ID 状态
+	-- Update ID state
 	redis.call('ZADD', key, newExpire, workerID)
 
-	-- 存储 Token
+	-- Store Token
 	local tokenKey = KEYS[2]
 	local token = ARGV[3]
 	local tokenData = token .. ':' .. newExpire
 	redis.call('HSET', tokenKey, workerID, tokenData)
-	redis.call('EXPIRE', tokenKey, lease * 3)  -- 设置 Token 过期时间
+	redis.call('EXPIRE', tokenKey, lease * 3)  -- Set Token hash expiration
 
-	return workerID
-`)
+	return tonumber(workerID)
+`
 
 func (g *RedisGenerator) GetID() (int64, string, error) {
 	token := generateToken()
@@ -130,15 +183,22 @@ func (g *RedisGenerator) GetID() (int64, string, error) {
 	if err != nil {
 		return 0, "", fmt.Errorf("get current time failed: %w", err)
 	}
-	result, err := getIDScript.Run(g.ctx, g.redisClient, []string{g.getIDsKey(), g.getTokenKey()},
-		now, g.leaseSeconds, token).Int64()
+	reply, err := g.eval(getIDScript, []string{g.getIDsKey(), g.getTokenKey()},
+		now, g.leaseSeconds, token)
 	if err != nil {
 		return 0, "", fmt.Errorf("get ID failed: %w", err)
+	}
+	result, err := toInt64(reply)
+	if err != nil {
+		return 0, "", fmt.Errorf("get ID failed: %w", err)
+	}
+	if result < 0 {
+		return 0, "", ErrNoAvailableID
 	}
 	return result, token, nil
 }
 
-var renewScript = redis.NewScript(`
+var renewScript = `
 	local tokenKey = KEYS[1]
 	local key = KEYS[2]
 	local workerID = ARGV[1]
@@ -146,42 +206,59 @@ var renewScript = redis.NewScript(`
 	local now = tonumber(ARGV[3])
 	local lease = tonumber(ARGV[4])
 
-	-- 1. 获取 Token 记录
+	-- 1. Get Token record
 	local tokenStr = redis.call('HGET', tokenKey, workerID)
 	if not tokenStr then
-		return {err="Token not found"}
+		return 'NOT_FOUND'
 	end
 
-	-- 更可靠的字符串分割方式
+	-- More reliable string split
 	local colonPos = string.find(tokenStr, ":")
 	if not colonPos then
-		return {err="Invalid token format"}
+		return 'INVALID'
 	end
 	local storedToken = string.sub(tokenStr, 1, colonPos-1)
 	local expireAtStr = string.sub(tokenStr, colonPos+1)
 
-	-- 2. 验证 Token 匹配性
+	-- 2. Verify Token match
 	if storedToken ~= token then
-		return {err="Token mismatch"}
+		return 'MISMATCH'
 	end
 
-	-- 3. 验证 Token 未过期
+	-- 3. Verify Token not expired
 	local expireAt = tonumber(expireAtStr)
 	if not expireAt or expireAt <= now then
-		return {err="Token expired"}
+		return 'EXPIRED'
 	end
 
-	-- 4. 延长 Token 和 ID 的过期时间
+	-- 4. Extend Token and ID expiration
 	local newExpireAt = now + lease
 	local newTokenStr = token .. ":" .. newExpireAt
 	redis.call('HSET', tokenKey, workerID, newTokenStr)
 	redis.call('ZADD', key, newExpireAt, workerID)
-	
-	-- 5. 重新设置 Token Hash 的过期时间，防止整个 Hash 过期
+
+	-- 5. Refresh Token Hash TTL to prevent whole Hash expiration
 	redis.call('EXPIRE', tokenKey, lease * 3)
 
-	return {ok="Success"}
-`)
+	return 'OK'
+`
+
+func (g *RedisGenerator) mapTokenStatus(status string) error {
+	switch status {
+	case "OK":
+		return nil
+	case "NOT_FOUND":
+		return ErrNotAssigned
+	case "MISMATCH":
+		return ErrTokenMismatch
+	case "EXPIRED":
+		return ErrTokenExpired
+	case "INVALID":
+		return ErrInvalidToken
+	default:
+		return fmt.Errorf("unexpected status: %s", status)
+	}
+}
 
 func (g *RedisGenerator) Renew(workerID int64, token string) error {
 	if workerID < 0 || workerID > int64(g.maxWorkerID) {
@@ -196,26 +273,54 @@ func (g *RedisGenerator) Renew(workerID int64, token string) error {
 		return fmt.Errorf("get current time failed: %w", err)
 	}
 
-	result, err := renewScript.Run(g.ctx, g.redisClient, []string{g.getTokenKey(), g.getIDsKey()},
-		workerID, token, now, g.leaseSeconds).Result()
+	reply, err := g.eval(renewScript, []string{g.getTokenKey(), g.getIDsKey()},
+		workerID, token, now, g.leaseSeconds)
 	if err != nil {
 		return fmt.Errorf("renew failed: %w", err)
 	}
 
-	if result == "Token not found" {
-		return ErrNotAssigned
+	status, err := toString(reply)
+	if err != nil {
+		return fmt.Errorf("renew failed: %w", err)
 	}
-	if result == "Token mismatch" {
-		return ErrTokenMismatch
-	}
-	if result == "Token expired" {
-		return ErrTokenExpired
-	}
-
-	return nil
+	return g.mapTokenStatus(status)
 }
 
-// Release 主动释放 WorkerID（使其可被重新分配）
+var releaseScript = `
+	local tokenKey = KEYS[1]
+	local key = KEYS[2]
+	local workerID = ARGV[1]
+	local token = ARGV[2]
+	local now = tonumber(ARGV[3])
+
+	local tokenStr = redis.call('HGET', tokenKey, workerID)
+	if not tokenStr then
+		return 'NOT_FOUND'
+	end
+
+	local colonPos = string.find(tokenStr, ":")
+	if not colonPos then
+		return 'INVALID'
+	end
+	local storedToken = string.sub(tokenStr, 1, colonPos-1)
+	local expireAtStr = string.sub(tokenStr, colonPos+1)
+
+	if storedToken ~= token then
+		return 'MISMATCH'
+	end
+
+	local expireAt = tonumber(expireAtStr)
+	if not expireAt or expireAt <= now then
+		return 'EXPIRED'
+	end
+
+	redis.call('HDEL', tokenKey, workerID)
+	redis.call('ZADD', key, 0, workerID)
+
+	return 'OK'
+`
+
+// Release actively releases a WorkerID (making it available for reallocation)
 func (g *RedisGenerator) Release(workerID int64, token string) error {
 	if workerID < 0 || workerID > int64(g.maxWorkerID) {
 		return ErrInvalidWorkerID
@@ -225,56 +330,20 @@ func (g *RedisGenerator) Release(workerID int64, token string) error {
 		return ErrInvalidToken
 	}
 
-	key := g.getIDsKey()
-	tokenKey := g.getTokenKey()
 	now, err := g.getCurrentTime()
 	if err != nil {
 		return fmt.Errorf("get current time failed: %w", err)
 	}
 
-	// 1. 获取 Token 记录（原子操作）
-	tokenStr, err := g.redisClient.HGet(g.ctx, tokenKey, strconv.FormatInt(workerID, 10)).Result()
+	reply, err := g.eval(releaseScript, []string{g.getTokenKey(), g.getIDsKey()},
+		workerID, token, now)
 	if err != nil {
-		return fmt.Errorf("get token failed: %w", err)
-	}
-	if tokenStr == "" {
-		return ErrNotAssigned
+		return fmt.Errorf("release failed: %w", err)
 	}
 
-	tokenData := strings.Split(tokenStr, ":")
-	if len(tokenData) != 2 {
-		return ErrInvalidToken
-	}
-
-	// 2. 验证 Token 匹配性
-	storedToken := tokenData[0]
-	if storedToken != token {
-		return ErrTokenMismatch
-	}
-
-	// 3. 验证 Token 未过期
-	expireAt, err := strconv.ParseInt(tokenData[1], 10, 64)
+	status, err := toString(reply)
 	if err != nil {
-		return fmt.Errorf("invalid expire_at format: %w", err)
+		return fmt.Errorf("release failed: %w", err)
 	}
-	if expireAt <= now {
-		return ErrTokenExpired
-	}
-
-	// 4. 删除 Token 记录（原子操作）
-	_, err = g.redisClient.HDel(g.ctx, tokenKey, strconv.FormatInt(workerID, 10)).Result()
-	if err != nil {
-		return fmt.Errorf("delete token failed: %w", err)
-	}
-
-	// 5. 重置 ID 的过期时间（标记为可用）
-	_, err = g.redisClient.ZAdd(g.ctx, key, &redis.Z{
-		Score:  0,
-		Member: workerID,
-	}).Result()
-	if err != nil {
-		return fmt.Errorf("reset expire time failed: %w", err)
-	}
-
-	return nil
+	return g.mapTokenStatus(status)
 }

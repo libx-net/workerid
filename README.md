@@ -7,7 +7,10 @@ A Go library for worker ID allocation and management in distributed systems.
 - **Distributed Safety**: Supports worker ID allocation in distributed environments
 - **Heartbeat Mechanism**: Supports worker liveliness detection
 - **Easy to Use**: Clean API design
-- **Multiple Storage Backends**: Default memory storage and Redis storage, supports custom storage
+- **Multiple Storage Backends**: Memory, Redis, and SQL (PostgreSQL / MySQL / SQLite)
+- **Zero third-party dependencies in the core module**: only the Go standard library (including `database/sql`)
+- **Redis Driver Agnostic**: Works with go-redis v7/v8/v9 (or any client) via `RedisDoer`
+- **SQL Client Agnostic**: Works with `database/sql`, GORM, sqlx, or Bun via `SQLClient` / `SQLTx`
 
 ## Installation
 
@@ -15,9 +18,61 @@ A Go library for worker ID allocation and management in distributed systems.
 go get libx.net/workerid
 ```
 
+Official adapters (optional):
+
+```bash
+go get libx.net/workerid/adapter/goredis-v8
+go get libx.net/workerid/adapter/goredis-v9
+go get libx.net/workerid/adapter/gorm
+go get libx.net/workerid/adapter/sqlx
+go get libx.net/workerid/adapter/bun
+```
+
 ## Quick Start
 
-### Using Redis Storage
+### Using Official go-redis Adapter (recommended)
+
+```go
+package main
+
+import (
+    "fmt"
+    "log"
+    "time"
+
+    "github.com/redis/go-redis/v9"
+    goredisv9 "libx.net/workerid/adapter/goredis-v9"
+    "libx.net/workerid"
+)
+
+func main() {
+    client := redis.NewClient(&redis.Options{Addr: "localhost:6379"})
+
+    generator, err := goredisv9.NewGenerator(
+        client,
+        "mycluster",
+        workerid.WithWorkerBits(8),
+        workerid.WithMaxLeaseTime(5*time.Minute),
+    )
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    workerID, token, err := generator.GetID()
+    if err != nil {
+        log.Fatal(err)
+    }
+    fmt.Printf("Acquired worker ID: %d, token: %s\n", workerID, token)
+}
+```
+
+For go-redis v8, use `libx.net/workerid/adapter/goredis-v8` the same way
+(`github.com/go-redis/redis/v8`).
+
+### Using Redis Storage (manual RedisDoer)
+
+`NewRedisGenerator` accepts a `RedisDoer` instead of a concrete go-redis client.
+Adapt your preferred go-redis version with a small closure:
 
 ```go
 package main
@@ -29,11 +84,7 @@ import (
     "time"
 
     "libx.net/workerid"
-    "github.com/go-redis/redis/v8"
-)
-
-var (
-    workerIDToken = ""
+    "github.com/go-redis/redis/v8" // or github.com/redis/go-redis/v9
 )
 
 func main() {
@@ -41,11 +92,20 @@ func main() {
         Addr: "localhost:6379",
     })
 
+    // go-redis v8 / v9
+    doer := workerid.RedisFunc(func(ctx context.Context, args ...any) (any, error) {
+        return client.Do(ctx, args...).Result()
+    })
+    // go-redis v7 (Do has no ctx):
+    // doer := workerid.RedisFunc(func(_ context.Context, args ...any) (any, error) {
+    //     return client.Do(args...).Result()
+    // })
+
     generator, err := workerid.NewRedisGenerator(
-        client,
-        "mycluster", // Cluster name for distinguishing different clusters
-        workerid.WithWorkerBits(8), // Optional, maxWorkerID = 1 << workerBits - 1, default maxWorkerID is 511
-        workerid.WithMaxLeaseTime(time.Minute*5), // Optional, lease time, default 5 minutes
+        doer,
+        "mycluster",
+        workerid.WithWorkerBits(8),
+        workerid.WithMaxLeaseTime(time.Minute*5),
     )
     if err != nil {
         log.Fatal(err)
@@ -56,29 +116,110 @@ func main() {
     }
 
     fmt.Printf("Acquired worker ID: %d\n", workerID)
-    ctx, cancel := context.WithCancel(context.Background())
-    defer func() {
-        if err := generator.Release(workerID, token); err != nil {
-            log.Printf("[WARN] release worker ID failed: %v\n", err)
-        }
-        cancel()
-    }()
-    ticker := time.NewTicker(time.Second * 90)
-    go func() {
-        select {
-            case <- ctx.Done():
-                fmt.Println("main process exit")
-                ticker.Stop()
-            case <-ticker.C:
-                if err := generator.Renew(workerID, token); err != nil {
-                    log.Fatal(err)
-                    ticker.Stop()
-                    return
-                }
-        }
-    }()
+    _ = token
 }
 ```
+
+### Using SQL Storage (PostgreSQL / MySQL / SQLite)
+
+SQL support lives in the **root module**. You choose:
+
+1. A **client** (`database/sql`, GORM, sqlx, or Bun) via `SQLClient`
+2. A **dialect** for the database product (`PostgresDialect`, `MySQL57Dialect`, `MySQL80Dialect`, `SQLiteDialect`)
+
+You must:
+
+1. Apply the matching schema (`PostgresSchema` / `MySQLSchema` / `SQLiteSchema`, also shipped as `schema_*.sql`) with your migration tool (the library does **not** auto-DDL).
+2. Call `InitializeSQLCluster` once to seed the ID pool.
+3. Create a generator with `NewSQLGenerator`.
+
+`CREATE TABLE IF NOT EXISTS` in `MySQLSchema` does **not** change an existing table. If `workerid_leases.expire_at` is still `TIMESTAMP(6)` (applied under a relaxed `sql_mode`), convert it before `InitializeSQLCluster` — seed/release write Unix epoch, which is also illegal as a `TIMESTAMP` value under `STRICT_TRANS_TABLES,NO_ZERO_DATE`:
+
+```sql
+ALTER TABLE workerid_leases
+  MODIFY expire_at DATETIME(6) NOT NULL DEFAULT '1970-01-01 00:00:00.000000';
+```
+
+If `workerid_leases_available_idx` is missing:
+
+```sql
+ALTER TABLE workerid_leases
+  ADD INDEX workerid_leases_available_idx (cluster, expire_at, worker_id);
+```
+
+Supported dialects:
+
+| Dialect | Constructor | Concurrency notes |
+|---|---|---|
+| PostgreSQL | `PostgresDialect()` | `FOR UPDATE SKIP LOCKED` |
+| MySQL 8.0+ | `MySQL80Dialect()` | `FOR UPDATE SKIP LOCKED` |
+| MySQL 5.7 | `MySQL57Dialect()` | `FOR UPDATE` (blocking) |
+| SQLite | `SQLiteDialect()` | Single-writer reserved lock; limited throughput |
+
+#### database/sql (stdlib wrapper)
+
+```go
+package main
+
+import (
+    "context"
+    "database/sql"
+    "fmt"
+    "log"
+    "time"
+
+    _ "github.com/jackc/pgx/v5/stdlib"
+    "libx.net/workerid"
+)
+
+func main() {
+    db, err := sql.Open("pgx", "postgres://user:pass@localhost:5432/dbname?sslmode=disable")
+    if err != nil {
+        log.Fatal(err)
+    }
+    defer db.Close()
+
+    // 1) Apply workerid.PostgresSchema via your migration system first.
+    client := workerid.NewDatabaseSQLClient(db)
+    dialect := workerid.PostgresDialect()
+    opts := []workerid.Option{
+        workerid.WithWorkerBits(8),
+        workerid.WithMaxLeaseTime(5 * time.Minute),
+    }
+
+    // 2) Seed the cluster once during deploy/bootstrap:
+    if err := workerid.InitializeSQLCluster(context.Background(), client, dialect, "mycluster", opts...); err != nil {
+        log.Fatal(err)
+    }
+
+    generator, err := workerid.NewSQLGenerator(client, dialect, "mycluster", opts...)
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    workerID, token, err := generator.GetID()
+    if err != nil {
+        log.Fatal(err)
+    }
+    fmt.Printf("Acquired worker ID: %d, token: %s\n", workerID, token)
+}
+```
+
+#### GORM / sqlx / Bun adapters
+
+```go
+import (
+    gormadapter "libx.net/workerid/adapter/gorm"
+    // sqlxadapter "libx.net/workerid/adapter/sqlx"
+    // bunadapter "libx.net/workerid/adapter/bun"
+)
+
+// After applying schema:
+_ = gormadapter.InitializeCluster(ctx, gdb, workerid.PostgresDialect(), "mycluster", opts...)
+gen, err := gormadapter.NewGenerator(gdb, workerid.PostgresDialect(), "mycluster", opts...)
+```
+
+Each ORM adapter exposes `NewClient`, `NewGenerator`, and `InitializeCluster`, and depends only on the root module plus its named ORM — never on a concrete database driver.
 
 ### Using Memory Storage
 
@@ -95,23 +236,21 @@ import (
 
 func main() {
     generator := workerid.NewMemoryGenerator(
-        workerid.WithWorkerBits(9), // Optional, workerIDBits, default maxWorkerID is 511
-        workerid.WithMaxLeaseTime(time.Minute*2), // Optional, lease time, default 5 minutes
+        workerid.WithWorkerBits(9),
+        workerid.WithMaxLeaseTime(time.Minute*2),
     )
-    
+
     workerID, token, err := generator.GetID()
     if err != nil {
         log.Fatal(err)
     }
-    
+
     fmt.Printf("Acquired worker ID: %d, Token: %s\n", workerID, token)
-    
-    // Renew the lease
+
     if err := generator.Renew(workerID, token); err != nil {
         log.Printf("Renew failed: %v\n", err)
     }
-    
-    // Release the worker ID
+
     if err := generator.Release(workerID, token); err != nil {
         log.Printf("Release failed: %v\n", err)
     }
@@ -133,12 +272,78 @@ type Generator interface {
 }
 ```
 
+### RedisDoer
+
+Driver-agnostic Redis command executor used by `RedisGenerator`.
+
+```go
+type RedisDoer interface {
+    Do(ctx context.Context, args ...any) (any, error)
+}
+
+// RedisFunc lets any function implement RedisDoer
+type RedisFunc func(ctx context.Context, args ...any) (any, error)
+```
+
 ### RedisGenerator
 
 Distributed worker ID allocator based on Redis.
 
 ```go
-func NewRedisGenerator(client *redis.Client, cluster string, opts ...Option) (*RedisGenerator, error)
+func NewRedisGenerator(client RedisDoer, cluster string, opts ...Option) (*RedisGenerator, error)
+```
+
+### Official Redis Adapters
+
+```go
+// adapter/goredis-v8
+func NewDoer(client redis.UniversalClient) workerid.RedisDoer
+func NewGenerator(client redis.UniversalClient, cluster string, options ...workerid.Option) (*workerid.RedisGenerator, error)
+
+// adapter/goredis-v9
+func NewDoer(client redis.UniversalClient) workerid.RedisDoer
+func NewGenerator(client redis.UniversalClient, cluster string, options ...workerid.Option) (*workerid.RedisGenerator, error)
+```
+
+### SQLClient / SQLGenerator
+
+```go
+type SQLRow interface {
+    Scan(dest ...any) error
+}
+
+type SQLTx interface {
+    QueryRow(ctx context.Context, query string, args ...any) SQLRow
+    Exec(ctx context.Context, query string, args ...any) error
+    Commit() error
+    Rollback() error
+}
+
+type SQLClient interface {
+    BeginTx(ctx context.Context) (SQLTx, error)
+}
+
+func NewDatabaseSQLClient(db *sql.DB) SQLClient
+func NewSQLGenerator(client SQLClient, dialect SQLDialect, cluster string, options ...Option) (*SQLGenerator, error)
+func InitializeSQLCluster(ctx context.Context, client SQLClient, dialect SQLDialect, cluster string, options ...Option) error
+
+func PostgresDialect() SQLDialect
+func MySQL57Dialect() SQLDialect
+func MySQL80Dialect() SQLDialect
+func SQLiteDialect() SQLDialect
+
+var PostgresSchema string
+var MySQLSchema string
+var SQLiteSchema string
+```
+
+### Official SQL ORM Adapters
+
+```go
+// adapter/gorm, adapter/sqlx, adapter/bun
+func NewClient(...) workerid.SQLClient
+func NewGenerator(..., dialect workerid.SQLDialect, cluster string, options ...workerid.Option) (*workerid.SQLGenerator, error)
+func InitializeCluster(ctx, ..., dialect workerid.SQLDialect, cluster string, options ...workerid.Option) error
 ```
 
 ### MemoryGenerator
@@ -157,30 +362,39 @@ func WithWorkerBits(workerBits uint) Option
 
 // WithMaxLeaseTime sets the maximum lease duration
 func WithMaxLeaseTime(maxLeaseTime time.Duration) Option
+
+// ResolveConfig applies options with shared defaults
+func ResolveConfig(cluster string, options ...Option) (GeneratorConfig, error)
 ```
 
 ## Error Types
 
 ```go
 var (
-    ErrNoAvailableID   = errors.New("no available worker IDs")
-    ErrInvalidWorkerID = errors.New("invalid worker ID")
-    ErrTokenMismatch   = errors.New("token mismatch")
-    ErrTokenExpired    = errors.New("token expired")
-    ErrNotAssigned     = errors.New("worker ID not assigned")
-    ErrInvalidToken    = errors.New("invalid token format")
+    ErrNoAvailableID         = errors.New("no available worker IDs")
+    ErrInvalidWorkerID       = errors.New("invalid worker ID")
+    ErrTokenMismatch         = errors.New("token mismatch")
+    ErrTokenExpired          = errors.New("token expired")
+    ErrNotAssigned           = errors.New("worker ID not assigned")
+    ErrInvalidToken          = errors.New("invalid token format")
+    ErrClusterConfigMismatch = errors.New("cluster max_worker_id mismatch")
+    ErrSQLNoRows             = errors.New("sql: no rows in result set")
 )
 ```
 
 ## Performance Considerations
 
-- **Redis**: Suitable for high-concurrency scenarios, supports distributed deployment, uses distributed locks to prevent two workers from acquiring the same worker ID simultaneously. Recommended workerBits is 10(max 1023).
+- **Redis**: Suitable for high-concurrency scenarios, supports distributed deployment, uses Lua scripts for atomic operations. Recommended workerBits is 10 (max 1023).
+- **PostgreSQL / MySQL 8.0+**: Good for SQL-centric deployments; uses `FOR UPDATE SKIP LOCKED`.
+- **MySQL 5.7**: Correct under concurrency but may block on row locks (no `SKIP LOCKED`).
+- **SQLite**: Correct single-writer model; not intended for high allocation throughput.
 - **Memory**: Highest performance, suitable for testing environments.
 
 ## Implementation Details
 
 - **Token Format**: 22-character base64 URL-encoded random string
-- **Redis Implementation**: Uses Lua scripts for atomic operations and Redis sorted sets for ID management
+- **Redis Implementation**: Uses Lua scripts for atomic operations and Redis sorted sets for ID management; no hard dependency on a specific go-redis version
+- **SQL Implementation**: Tables `workerid_clusters` and `workerid_leases`; schema is user-managed; lease time uses database-side timestamps; client and dialect are separate concerns
 - **Memory Implementation**: Uses mutex locks for thread safety
 
 ## Examples
@@ -197,7 +411,7 @@ cd examples/redis
 go mod tidy
 go run main.go
 
-# Memory example  
+# Memory example
 cd examples/memory
 go mod tidy
 go run main.go
