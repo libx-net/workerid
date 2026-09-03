@@ -141,9 +141,20 @@ func TestIntegrationMySQL(t *testing.T) {
 		t.Fatalf("unleased expire_at = %q, want Unix-epoch DATETIME", expireAt)
 	}
 
-	// GetID/Renew/Release stay on the original integration path once SelectAvailable
-	// uses valid MySQL LIMIT/FOR UPDATE order (see issue #2). This test only covers
-	// schema apply + InitializeSQLCluster, which is what #3 blocks.
+	gen, err := workerid.NewSQLGenerator(client, dialect, cluster, opts...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, token, err := gen.GetID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := gen.Renew(id, token); err != nil {
+		t.Fatal(err)
+	}
+	if err := gen.Release(id, token); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func applyMySQLSchema(t *testing.T, db *sql.DB) {
@@ -158,12 +169,23 @@ func applyMySQLSchema(t *testing.T, db *sql.DB) {
 func splitSQLStatements(schema string) []string {
 	var out []string
 	for _, stmt := range strings.Split(schema, ";") {
-		stmt = strings.TrimSpace(stmt)
-		if stmt != "" {
-			out = append(out, stmt)
+		if sqlStatementIsEmpty(stmt) {
+			continue
 		}
+		out = append(out, strings.TrimSpace(stmt))
 	}
 	return out
+}
+
+func sqlStatementIsEmpty(stmt string) bool {
+	for _, line := range strings.Split(stmt, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "--") {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func TestIntegrationSQLite(t *testing.T) {

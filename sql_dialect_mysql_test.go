@@ -103,6 +103,19 @@ func TestMySQLSchemaExpireAtDefaultIsLegal(t *testing.T) {
 	}
 }
 
+func TestMySQLSchemaDocumentsTimestampUpgrade(t *testing.T) {
+	// CREATE TABLE IF NOT EXISTS is a no-op on an existing TIMESTAMP column.
+	if !strings.Contains(MySQLSchema, "ALTER TABLE workerid_leases") {
+		t.Fatal("MySQLSchema must document ALTER for existing TIMESTAMP expire_at")
+	}
+	if !strings.Contains(MySQLSchema, "MODIFY expire_at DATETIME(6) NOT NULL DEFAULT '1970-01-01 00:00:00.000000'") {
+		t.Fatal("MySQLSchema must document MODIFY expire_at to DATETIME(6)")
+	}
+	if !strings.Contains(MySQLSchema, "ADD INDEX workerid_leases_available_idx (cluster, expire_at, worker_id)") {
+		t.Fatal("MySQLSchema must document adding workerid_leases_available_idx")
+	}
+}
+
 func TestMySQLSchemaDDLIsIdempotent(t *testing.T) {
 	// DDL is not transactional: if workerid_clusters is created and
 	// workerid_leases then fails, retry must not hit "table already exists".

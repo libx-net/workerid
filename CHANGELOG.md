@@ -82,6 +82,7 @@ doer := workerid.RedisFunc(func(_ context.Context, args ...any) (any, error) {
 
 ### Bug fixes
 
+* fix: MySQL `workerid_leases.expire_at` is `DATETIME(6)` so `MySQLSchema` applies under `STRICT_TRANS_TABLES,NO_ZERO_DATE` (TIMESTAMP Unix-epoch default is Error 1067). `CREATE TABLE IF NOT EXISTS` does not migrate an existing TIMESTAMP column — run the `ALTER TABLE ... MODIFY expire_at DATETIME(6)` in `schema_mysql.sql` / README yourself (no auto-DDL)
 * fix: `Renew` correctly maps NOT_FOUND / MISMATCH / EXPIRED (old `{err=...}` Lua replies were not matched as result strings under go-redis)
 
 ### Documentation updates
