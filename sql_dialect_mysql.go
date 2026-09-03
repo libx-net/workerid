@@ -76,13 +76,15 @@ func (d *mysqlDialect) SelectAvailable(ctx context.Context, tx SQLTx, cluster st
 	if d.skipLocked {
 		lockClause = "FOR UPDATE SKIP LOCKED"
 	}
+	// MySQL requires LIMIT before FOR UPDATE [SKIP LOCKED].
+	// Putting LIMIT after FOR UPDATE is a syntax error (1064) on 5.7 and 8.x.
 	query := fmt.Sprintf(`
 SELECT worker_id
 FROM workerid_leases
 WHERE cluster = ? AND expire_at <= CURRENT_TIMESTAMP(6)
 ORDER BY worker_id
-%s
 LIMIT 1
+%s
 `, lockClause)
 	var workerID int64
 	err := tx.QueryRow(ctx, query, cluster).Scan(&workerID)
