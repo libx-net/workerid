@@ -2,6 +2,7 @@ package workerid
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -54,6 +55,41 @@ func TestNewRedisGenerator_Validation(t *testing.T) {
 	}
 	if _, err := NewRedisGenerator(&fakeRedis{evalSeq: []any{int64(0)}}, ""); err == nil {
 		t.Fatal("expected empty cluster error")
+	}
+}
+
+func TestNewRedisGenerator_MaxLeaseTime(t *testing.T) {
+	fr := &fakeRedis{evalSeq: []any{int64(1)}}
+	_, err := NewRedisGenerator(fr, "c1", WithMaxLeaseTime(500*time.Millisecond))
+	if !errors.Is(err, ErrMaxLeaseTimeTooShort) {
+		t.Fatalf("500ms: err=%v, want ErrMaxLeaseTimeTooShort", err)
+	}
+	if fr.evalIdx != 0 {
+		t.Fatalf("rejected lease must not initialize Redis, evalIdx=%d", fr.evalIdx)
+	}
+
+	fr = &fakeRedis{evalSeq: []any{int64(1)}}
+	_, err = NewRedisGenerator(fr, "c1", WithMaxLeaseTime(999*time.Millisecond))
+	if !errors.Is(err, ErrMaxLeaseTimeTooShort) {
+		t.Fatalf("999ms: err=%v, want ErrMaxLeaseTimeTooShort", err)
+	}
+
+	fr = &fakeRedis{evalSeq: []any{int64(1)}}
+	gen, err := NewRedisGenerator(fr, "c1", WithMaxLeaseTime(time.Second))
+	if err != nil {
+		t.Fatalf("1s: %v", err)
+	}
+	if gen.leaseSeconds != 1 {
+		t.Fatalf("leaseSeconds=%d, want 1", gen.leaseSeconds)
+	}
+
+	fr = &fakeRedis{evalSeq: []any{int64(1)}}
+	gen, err = NewRedisGenerator(fr, "c1")
+	if err != nil {
+		t.Fatalf("default: %v", err)
+	}
+	if gen.leaseSeconds != 300 {
+		t.Fatalf("leaseSeconds=%d, want 300", gen.leaseSeconds)
 	}
 }
 

@@ -83,6 +83,7 @@ func TestGenerator_ErrorTypes(t *testing.T) {
 		ErrTokenExpired,
 		ErrNotAssigned,
 		ErrInvalidToken,
+		ErrMaxLeaseTimeTooShort,
 	}
 	for _, err := range errs {
 		if err == nil {
