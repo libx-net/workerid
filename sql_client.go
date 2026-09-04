@@ -5,8 +5,8 @@ import (
 	"errors"
 )
 
-// ErrClusterConfigMismatch is returned when InitializeSQLCluster finds an existing
-// cluster whose max_worker_id differs from the configured value.
+// ErrClusterConfigMismatch is returned when InitializeSQLCluster or NewRedisGenerator
+// finds an existing cluster whose max_worker_id differs from the configured value.
 var ErrClusterConfigMismatch = errors.New("cluster max_worker_id mismatch")
 
 // ErrSQLNoRows is returned when a QueryRow finds no matching row.

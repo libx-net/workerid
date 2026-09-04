@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -125,26 +126,68 @@ func (g *RedisGenerator) getCurrentTime() (int64, error) {
 	return time.Now().Unix(), nil
 }
 
+// initIDsScript persists max_worker_id next to the zset (same hash tag) and
+// seeds 0..maxID when the zset is empty. If the zset already exists without a
+// meta key (contiguous 0..N pools), the stored max is inferred as ZCARD-1 so a
+// smaller joiner cannot SETNX its own maxID. Returns 1 if seeded, 0 if the
+// zset already existed with a matching max, or "MISMATCH:<stored>" on mismatch.
 var initIDsScript = `
-	local key = KEYS[1]
+	local idsKey = KEYS[1]
+	local metaKey = KEYS[2]
 	local maxID = tonumber(ARGV[1])
-	if redis.call('ZCARD', key) > 0 then
+	local card = redis.call('ZCARD', idsKey)
+
+	if card > 0 then
+		redis.call('SETNX', metaKey, card - 1)
+	else
+		redis.call('SETNX', metaKey, maxID)
+	end
+
+	local stored = tonumber(redis.call('GET', metaKey))
+	if stored ~= maxID then
+		return 'MISMATCH:' .. tostring(stored)
+	end
+	if card > 0 then
 		return 0
 	end
 	for i = 0, maxID do
-		redis.call('ZADD', key, 0, tostring(i))
+		redis.call('ZADD', idsKey, 0, tostring(i))
 	end
 	return 1
 `
 
 func (g *RedisGenerator) initAvailableIDs() error {
-	_, err := g.eval(initIDsScript, []string{g.getIDsKey()}, g.maxWorkerID)
-	return err
+	reply, err := g.eval(initIDsScript, []string{g.getIDsKey(), g.getMaxWorkerIDKey()}, g.maxWorkerID)
+	if err != nil {
+		return err
+	}
+	return initReplyError(reply, g.maxWorkerID)
+}
+
+func initReplyError(reply any, configured uint32) error {
+	s, err := toString(reply)
+	if err != nil {
+		return nil
+	}
+	const prefix = "MISMATCH:"
+	if !strings.HasPrefix(s, prefix) {
+		return nil
+	}
+	stored, err := toInt64(s[len(prefix):])
+	if err != nil {
+		return fmt.Errorf("%w: configured=%d", ErrClusterConfigMismatch, configured)
+	}
+	return fmt.Errorf("%w: stored=%d configured=%d", ErrClusterConfigMismatch, stored, configured)
 }
 
 // getIDsKey returns the Sorted Set key for WorkerIDs
 func (g *RedisGenerator) getIDsKey() string {
 	return fmt.Sprintf("{workerid:cluster:%s}:ids", g.cluster)
+}
+
+// getMaxWorkerIDKey returns the string key that stores this cluster's max_worker_id.
+func (g *RedisGenerator) getMaxWorkerIDKey() string {
+	return fmt.Sprintf("{workerid:cluster:%s}:max_worker_id", g.cluster)
 }
 
 // getTokenKey returns the Token storage key

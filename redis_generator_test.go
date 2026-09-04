@@ -179,6 +179,31 @@ func TestRedisGenerator_RenewErrors(t *testing.T) {
 	}
 }
 
+func TestNewRedisGenerator_ConfigMismatch(t *testing.T) {
+	fr := &fakeRedis{evalSeq: []any{"MISMATCH:15"}}
+	_, err := NewRedisGenerator(fr, "c1", WithWorkerBits(3))
+	if !errors.Is(err, ErrClusterConfigMismatch) {
+		t.Fatalf("err=%v, want ErrClusterConfigMismatch", err)
+	}
+}
+
+func TestInitReplyError(t *testing.T) {
+	if err := initReplyError(int64(0), 15); err != nil {
+		t.Fatalf("int64 0: %v", err)
+	}
+	if err := initReplyError(int64(1), 15); err != nil {
+		t.Fatalf("int64 1: %v", err)
+	}
+	if err := initReplyError("MISMATCH:15", 7); !errors.Is(err, ErrClusterConfigMismatch) {
+		t.Fatalf("mismatch string: %v", err)
+	} else if !strings.Contains(err.Error(), "stored=15") || !strings.Contains(err.Error(), "configured=7") {
+		t.Fatalf("error text: %v", err)
+	}
+	if err := initReplyError([]byte("MISMATCH:15"), 7); !errors.Is(err, ErrClusterConfigMismatch) {
+		t.Fatalf("mismatch bytes: %v", err)
+	}
+}
+
 func TestRedisGenerator_WithOptions(t *testing.T) {
 	fr := &fakeRedis{evalSeq: []any{int64(1)}}
 	gen, err := NewRedisGenerator(fr, "c1", WithWorkerBits(10), WithMaxLeaseTime(10*time.Minute))
