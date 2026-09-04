@@ -1,6 +1,8 @@
 package goredisv9
 
 import (
+	"errors"
+	"strconv"
 	"testing"
 	"time"
 
@@ -60,5 +62,55 @@ func TestNewDoer(t *testing.T) {
 	}
 	if _, _, err := gen.GetID(); err != nil {
 		t.Fatalf("GetID: %v", err)
+	}
+}
+
+func TestNewGenerator_ClusterConfig(t *testing.T) {
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatalf("start miniredis: %v", err)
+	}
+	defer mr.Close()
+
+	client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	defer client.Close()
+
+	const cluster = "bits-cluster"
+	idsKey := "{workerid:cluster:" + cluster + "}:ids"
+	metaKey := "{workerid:cluster:" + cluster + "}:max_worker_id"
+
+	if _, err := NewGenerator(client, cluster, workerid.WithWorkerBits(4), workerid.WithMaxLeaseTime(time.Minute)); err != nil {
+		t.Fatalf("first NewGenerator (4 bits): %v", err)
+	}
+	assertSeededIDs(t, mr, idsKey, 15)
+	if got, err := mr.Get(metaKey); err != nil || got != "15" {
+		t.Fatalf("max_worker_id=%q err=%v, want 15", got, err)
+	}
+
+	if _, err := NewGenerator(client, cluster, workerid.WithWorkerBits(4), workerid.WithMaxLeaseTime(time.Minute)); err != nil {
+		t.Fatalf("same bits should succeed: %v", err)
+	}
+	assertSeededIDs(t, mr, idsKey, 15)
+
+	_, err = NewGenerator(client, cluster, workerid.WithWorkerBits(3), workerid.WithMaxLeaseTime(time.Minute))
+	if !errors.Is(err, workerid.ErrClusterConfigMismatch) {
+		t.Fatalf("different bits: err=%v, want ErrClusterConfigMismatch", err)
+	}
+	assertSeededIDs(t, mr, idsKey, 15)
+	if got, err := mr.Get(metaKey); err != nil || got != "15" {
+		t.Fatalf("mismatch must not rewrite max_worker_id: got=%q err=%v", got, err)
+	}
+}
+
+func assertSeededIDs(t *testing.T, mr *miniredis.Miniredis, idsKey string, maxID int) {
+	t.Helper()
+	members := mr.SortedSet(idsKey)
+	if len(members) != maxID+1 {
+		t.Fatalf("%s has %d members, want %d (0..%d)", idsKey, len(members), maxID+1, maxID)
+	}
+	for i := 0; i <= maxID; i++ {
+		if _, ok := members[strconv.Itoa(i)]; !ok {
+			t.Fatalf("%s missing member %d", idsKey, i)
+		}
 	}
 }

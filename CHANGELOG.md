@@ -5,6 +5,7 @@
 ### Bug fixes
 
 * fix: MemoryGenerator worker IDs now include `0`, matching Redis/SQL `[0, maxWorkerID]`
+* fix: Redis `NewRedisGenerator` persists `max_worker_id` next to the ID zset and returns `ErrClusterConfigMismatch` when `WithWorkerBits` does not match an existing cluster (same check as `InitializeSQLCluster`)
 
 ### Documentation updates
 

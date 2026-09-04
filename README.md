@@ -293,6 +293,8 @@ Distributed worker ID allocator based on Redis.
 func NewRedisGenerator(client RedisDoer, cluster string, opts ...Option) (*RedisGenerator, error)
 ```
 
+`NewRedisGenerator` seeds IDs `0..maxWorkerID` on first use and stores `max_worker_id` beside the zset (same `{workerid:cluster:%s}` hash tag). A later process that joins the same cluster name with a different `WithWorkerBits` gets `ErrClusterConfigMismatch`.
+
 ### Official Redis Adapters
 
 ```go
