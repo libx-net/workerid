@@ -4,8 +4,9 @@
 
 ### Bug fixes
 
+* fix: reject `WithMaxLeaseTime` shorter than 1s (`ErrMaxLeaseTimeTooShort`); values `<=0` still default to 5m
 * fix: MemoryGenerator worker IDs now include `0`, matching Redis/SQL `[0, maxWorkerID]`
-* fix: Redis `NewRedisGenerator` persists `max_worker_id` next to the ID zset and returns `ErrClusterConfigMismatch` when `WithWorkerBits` does not match an existing cluster (same check as `InitializeSQLCluster`)
+* fix: Redis `NewRedisGenerator` persists `max_worker_id` next to the ID zset and returns `ErrClusterConfigMismatch` when `WithWorkerBits` does not match an existing cluster (same check as `InitializeSQLCluster`). Legacy zsets without a meta key infer max as `ZCARD-1` so a smaller joiner cannot stamp the wrong value.
 
 ### Documentation updates
 

@@ -102,6 +102,60 @@ func TestNewGenerator_ClusterConfig(t *testing.T) {
 	}
 }
 
+func TestNewGenerator_LegacyZSetNoMeta(t *testing.T) {
+	const cluster = "legacy-cluster"
+	idsKey := "{workerid:cluster:" + cluster + "}:ids"
+	metaKey := "{workerid:cluster:" + cluster + "}:max_worker_id"
+
+	t.Run("smaller bits mismatch", func(t *testing.T) {
+		mr, err := miniredis.Run()
+		if err != nil {
+			t.Fatalf("start miniredis: %v", err)
+		}
+		defer mr.Close()
+		client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+		defer client.Close()
+
+		seedLegacyIDs(t, mr, idsKey, 15)
+		_, err = NewGenerator(client, cluster, workerid.WithWorkerBits(3), workerid.WithMaxLeaseTime(time.Minute))
+		if !errors.Is(err, workerid.ErrClusterConfigMismatch) {
+			t.Fatalf("err=%v, want ErrClusterConfigMismatch", err)
+		}
+		assertSeededIDs(t, mr, idsKey, 15)
+		if got, err := mr.Get(metaKey); err != nil || got != "15" {
+			t.Fatalf("inferred max_worker_id=%q err=%v, want 15 (not joiner 7)", got, err)
+		}
+	})
+
+	t.Run("matching bits records meta", func(t *testing.T) {
+		mr, err := miniredis.Run()
+		if err != nil {
+			t.Fatalf("start miniredis: %v", err)
+		}
+		defer mr.Close()
+		client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+		defer client.Close()
+
+		seedLegacyIDs(t, mr, idsKey, 15)
+		if _, err := NewGenerator(client, cluster, workerid.WithWorkerBits(4), workerid.WithMaxLeaseTime(time.Minute)); err != nil {
+			t.Fatalf("matching bits on legacy zset: %v", err)
+		}
+		assertSeededIDs(t, mr, idsKey, 15)
+		if got, err := mr.Get(metaKey); err != nil || got != "15" {
+			t.Fatalf("max_worker_id=%q err=%v, want 15", got, err)
+		}
+	})
+}
+
+func seedLegacyIDs(t *testing.T, mr *miniredis.Miniredis, idsKey string, maxID int) {
+	t.Helper()
+	for i := 0; i <= maxID; i++ {
+		if _, err := mr.ZAdd(idsKey, 0, strconv.Itoa(i)); err != nil {
+			t.Fatalf("ZAdd %d: %v", i, err)
+		}
+	}
+}
+
 func assertSeededIDs(t *testing.T, mr *miniredis.Miniredis, idsKey string, maxID int) {
 	t.Helper()
 	list, err := mr.ZMembers(idsKey)
