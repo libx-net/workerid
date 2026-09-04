@@ -395,7 +395,7 @@ var (
 - **Token Format**: 22-character base64 URL-encoded random string
 - **Redis Implementation**: Uses Lua scripts for atomic operations and Redis sorted sets for ID management; no hard dependency on a specific go-redis version
 - **SQL Implementation**: Tables `workerid_clusters` and `workerid_leases`; schema is user-managed; lease time uses database-side timestamps; client and dialect are separate concerns
-- **Memory Implementation**: Uses mutex locks for thread safety
+- **Memory Implementation**: Picks one ID in `[0, maxWorkerID]` at construction and always returns it from `GetID` (no mutex; not a distributed allocator)
 
 ## Examples
 

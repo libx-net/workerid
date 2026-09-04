@@ -1,6 +1,7 @@
 package workerid
 
 import (
+	"math"
 	"testing"
 )
 
@@ -8,17 +9,17 @@ func TestNewMemoryGenerator(t *testing.T) {
 	tests := []struct {
 		name    string
 		options []Option
-		wantErr bool
+		maxID   int64
 	}{
 		{
 			name:    "default configuration",
 			options: nil,
-			wantErr: false,
+			maxID:   511,
 		},
 		{
 			name:    "custom max WorkerID",
 			options: []Option{WithWorkerBits(4)},
-			wantErr: false,
+			maxID:   15,
 		},
 	}
 
@@ -30,12 +31,10 @@ func TestNewMemoryGenerator(t *testing.T) {
 				return
 			}
 
-			// Verify generated WorkerID is within valid range
-			if gen.workerID <= 0 {
-				t.Errorf("WorkerID should be > 0, got: %d", gen.workerID)
+			if gen.workerID < 0 || gen.workerID > tt.maxID {
+				t.Errorf("WorkerID should be in [0, %d], got: %d", tt.maxID, gen.workerID)
 			}
 
-			// Verify Token is non-empty and has correct length
 			if len(gen.token) != 22 {
 				t.Errorf("Token length should be 22, got: %d", len(gen.token))
 			}
@@ -143,9 +142,52 @@ func TestMemoryGenerator_WithMaxWorkerID(t *testing.T) {
 	maxWorkerID := uint32(63)
 	gen := NewMemoryGenerator(WithWorkerBits(workerBits))
 
-	// Verify generated WorkerID is within specified range
-	if gen.workerID <= 0 || gen.workerID > int64(maxWorkerID) {
-		t.Errorf("WorkerID should be in range 1-%d, got: %d", maxWorkerID, gen.workerID)
+	if gen.workerID < 0 || gen.workerID > int64(maxWorkerID) {
+		t.Errorf("WorkerID should be in range [0, %d], got: %d", maxWorkerID, gen.workerID)
+	}
+}
+
+func TestRandomWorkerID_ZeroIsReachable(t *testing.T) {
+	// rand.N(1) is always 0, so maxID=0 is a deterministic construct-path
+	// proof that 0 is in the inclusive range [0, maxID].
+	if got := randomWorkerID(0); got != 0 {
+		t.Errorf("randomWorkerID(0) = %d, want 0", got)
+	}
+	for i := 0; i < 8; i++ {
+		if got := randomWorkerID(0); got != 0 {
+			t.Errorf("randomWorkerID(0) = %d, want 0", got)
+		}
+	}
+}
+
+func TestRandomWorkerID_MaxUint32DoesNotPanic(t *testing.T) {
+	// uint64(maxID)+1 must not wrap to 0; rand.N(0) panics.
+	for i := 0; i < 4; i++ {
+		_ = randomWorkerID(math.MaxUint32)
+	}
+}
+
+func TestMemoryGenerator_WorkerIDZeroReachable(t *testing.T) {
+	const samples = 500
+	seenZero := false
+	var maxSeen int64 = -1
+	for i := 0; i < samples; i++ {
+		gen := NewMemoryGenerator(WithWorkerBits(1)) // maxID = 1, set {0, 1}
+		if gen.workerID < 0 || gen.workerID > 1 {
+			t.Fatalf("WorkerID out of [0, 1]: %d", gen.workerID)
+		}
+		if gen.workerID == 0 {
+			seenZero = true
+		}
+		if gen.workerID > maxSeen {
+			maxSeen = gen.workerID
+		}
+	}
+	if !seenZero {
+		t.Fatalf("WorkerID 0 never appeared in %d samples with WithWorkerBits(1)", samples)
+	}
+	if maxSeen != 1 {
+		t.Fatalf("expected WorkerID 1 to appear, maxSeen=%d", maxSeen)
 	}
 }
 

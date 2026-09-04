@@ -1,5 +1,15 @@
 # WorkerID ChangeLog
 
+## Unreleased
+
+### Bug fixes
+
+* fix: MemoryGenerator worker IDs now include `0`, matching Redis/SQL `[0, maxWorkerID]`
+
+### Documentation updates
+
+* docs: drop stale README claim that Memory uses mutex locks
+
 ## WorkerID v0.3.0
 
 Major breaking release relative to v0.2.0: the core library has **zero third-party dependencies**, Redis and SQL backends are driver/ORM-agnostic, and official adapter submodules are provided for popular clients.
