@@ -1,8 +1,14 @@
+# Pushing a root semver tag (vX.Y.Z) publishes the GitHub Release from CHANGELOG.md
+# and creates nested adapter module tags at the same commit.
+#
+# Before tagging vX.Y.Z, ensure CHANGELOG.md has `## WorkerID vX.Y.Z` and that
+# adapters require that version.
 name: Goreleaser
 
 on:
   push:
     tags:
+      # Root module only. Nested tags like adapter/bun/vX.Y.Z must not match.
       - "v[0-9]*"
 
 permissions:
@@ -16,21 +22,133 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
           go-version: "^1"
+
+      - name: Extract CHANGELOG section for tag
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          NOTES_FILE="${RUNNER_TEMP}/release-notes.md"
+          HEADING="## WorkerID ${TAG}"
+
+          if [[ ! -f CHANGELOG.md ]]; then
+            echo "::error::CHANGELOG.md is missing"
+            exit 1
+          fi
+
+          set +e
+          awk -v heading="$HEADING" '
+            function trim(s) {
+              sub(/\r$/, "", s)
+              sub(/[ \t]+$/, "", s)
+              return s
+            }
+            {
+              line = trim($0)
+              if (line == heading) {
+                found = 1
+              } else if (found && line ~ /^## WorkerID /) {
+                exit
+              }
+              if (found) print
+            }
+            END {
+              if (!found) exit 2
+            }
+          ' CHANGELOG.md > "${NOTES_FILE}"
+          awk_status=$?
+          set -e
+
+          if [[ "${awk_status}" -eq 2 ]] || [[ ! -s "${NOTES_FILE}" ]]; then
+            echo "::error::CHANGELOG.md has no section '${HEADING}'"
+            exit 1
+          fi
+          if [[ "${awk_status}" -ne 0 ]]; then
+            echo "::error::Failed to extract CHANGELOG.md section '${HEADING}'"
+            exit 1
+          fi
+
+          body="$(awk 'NR > 1 { print }' "${NOTES_FILE}" | tr -d '[:space:]')"
+          if [[ -z "${body}" ]]; then
+            echo "::error::CHANGELOG.md section '${HEADING}' is empty"
+            exit 1
+          fi
+
+          echo "Wrote release notes for ${TAG} ($(wc -l < "${NOTES_FILE}") lines)"
+
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v6
         with:
-          # either 'goreleaser' (default) or 'goreleaser-pro'
           distribution: goreleaser
           version: latest
-          args: release --clean
+          args: release --clean --release-notes=${{ runner.temp }}/release-notes.md
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-#      - name: Trigger Go module reindex (pkg.go.dev)
-#        run: |
-#          echo "Triggering Go module reindex at proxy.golang.org"
-#          curl -sSf "https://proxy.golang.org/github.com/${GITHUB_REPOSITORY,,}/@v/${GITHUB_REF_NAME}.info"
+      - name: Tag nested adapter modules
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          SHA="$(git rev-parse "${TAG}^{commit}")"
+          echo "Root tag ${TAG} is at ${SHA}"
+
+          adapters=(
+            adapter/bun
+            adapter/goredis-v8
+            adapter/goredis-v9
+            adapter/gorm
+            adapter/sqlx
+          )
+
+          for mod in "${adapters[@]}"; do
+            nested="${mod}/${TAG}"
+            if gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${nested}" >/dev/null 2>&1; then
+              echo "Tag ${nested} already exists, skipping"
+              continue
+            fi
+            echo "Creating tag ${nested} at ${SHA}"
+            if ! gh api --method POST "repos/${GITHUB_REPOSITORY}/git/refs" \
+              -f ref="refs/tags/${nested}" \
+              -f sha="${SHA}"; then
+              # Race or already-created: treat an existing ref as success.
+              if gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${nested}" >/dev/null 2>&1; then
+                echo "Tag ${nested} already exists, skipping"
+                continue
+              fi
+              echo "::error::Failed to create tag ${nested}"
+              exit 1
+            fi
+          done
+
+      - name: Notify Go module proxy
+        continue-on-error: true
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -u
+          modules=(
+            libx.net/workerid
+            libx.net/workerid/adapter/bun
+            libx.net/workerid/adapter/goredis-v8
+            libx.net/workerid/adapter/goredis-v9
+            libx.net/workerid/adapter/gorm
+            libx.net/workerid/adapter/sqlx
+          )
+          status=0
+          for mod in "${modules[@]}"; do
+            url="https://proxy.golang.org/${mod}/@v/${TAG}.info"
+            echo "Fetching ${url}"
+            if ! curl -fsS --max-time 30 "${url}"; then
+              echo "warning: proxy fetch failed for ${mod}@${TAG} (soft-fail)"
+              status=1
+            fi
+            echo
+          done
+          exit "${status}"

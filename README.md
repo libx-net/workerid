@@ -420,6 +420,12 @@ go mod tidy
 go run main.go
 ```
 
+## Releasing
+
+Push a root tag `vX.Y.Z` (for example `git tag v0.3.2 && git push origin v0.3.2`) to publish. GoReleaser uses the matching `## WorkerID vX.Y.Z` section in `CHANGELOG.md` as the GitHub Release body and then creates adapter tags (`adapter/*/vX.Y.Z`) at the same commit.
+
+Before tagging, ensure `CHANGELOG.md` has `## WorkerID vX.Y.Z` and that adapter modules require that version.
+
 ## License
 
 MIT License
