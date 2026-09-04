@@ -104,7 +104,14 @@ func TestNewGenerator_ClusterConfig(t *testing.T) {
 
 func assertSeededIDs(t *testing.T, mr *miniredis.Miniredis, idsKey string, maxID int) {
 	t.Helper()
-	members := mr.SortedSet(idsKey)
+	list, err := mr.ZMembers(idsKey)
+	if err != nil {
+		t.Fatalf("ZMembers %s: %v", idsKey, err)
+	}
+	members := make(map[string]struct{}, len(list))
+	for _, m := range list {
+		members[m] = struct{}{}
+	}
 	if len(members) != maxID+1 {
 		t.Fatalf("%s has %d members, want %d (0..%d)", idsKey, len(members), maxID+1, maxID)
 	}
