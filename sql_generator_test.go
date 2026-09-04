@@ -166,6 +166,35 @@ func (d *scriptDialect) Release(ctx context.Context, tx SQLTx, cluster string, w
 	return tx.Exec(ctx, "release", cluster, workerID)
 }
 
+func TestNewSQLGenerator_MaxLeaseTime(t *testing.T) {
+	client := newFakeSQLClient()
+	_, err := NewSQLGenerator(client, &scriptDialect{}, "c1", WithMaxLeaseTime(500*time.Millisecond))
+	if !errors.Is(err, ErrMaxLeaseTimeTooShort) {
+		t.Fatalf("500ms: err=%v, want ErrMaxLeaseTimeTooShort", err)
+	}
+
+	_, err = NewSQLGenerator(client, &scriptDialect{}, "c1", WithMaxLeaseTime(999*time.Millisecond))
+	if !errors.Is(err, ErrMaxLeaseTimeTooShort) {
+		t.Fatalf("999ms: err=%v, want ErrMaxLeaseTimeTooShort", err)
+	}
+
+	gen, err := NewSQLGenerator(client, &scriptDialect{}, "c1", WithMaxLeaseTime(time.Second))
+	if err != nil {
+		t.Fatalf("1s: %v", err)
+	}
+	if gen.leaseSeconds != 1 {
+		t.Fatalf("leaseSeconds=%d, want 1", gen.leaseSeconds)
+	}
+
+	gen, err = NewSQLGenerator(client, &scriptDialect{}, "c1")
+	if err != nil {
+		t.Fatalf("default: %v", err)
+	}
+	if gen.leaseSeconds != 300 {
+		t.Fatalf("leaseSeconds=%d, want 300", gen.leaseSeconds)
+	}
+}
+
 func TestSQLGenerator_GetID(t *testing.T) {
 	client := newFakeSQLClient()
 	client.queueRow(scanVals{int64(2)}, nil)

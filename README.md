@@ -360,7 +360,7 @@ func NewMemoryGenerator(opts ...Option) *MemoryGenerator
 // WithWorkerBits sets bits for store workerID
 func WithWorkerBits(workerBits uint) Option
 
-// WithMaxLeaseTime sets the maximum lease duration
+// WithMaxLeaseTime sets the maximum lease duration (minimum 1s; <=0 uses 5m)
 func WithMaxLeaseTime(maxLeaseTime time.Duration) Option
 
 // ResolveConfig applies options with shared defaults
@@ -377,6 +377,7 @@ var (
     ErrTokenExpired          = errors.New("token expired")
     ErrNotAssigned           = errors.New("worker ID not assigned")
     ErrInvalidToken          = errors.New("invalid token format")
+    ErrMaxLeaseTimeTooShort  = errors.New("max lease time must be at least 1s")
     ErrClusterConfigMismatch = errors.New("cluster max_worker_id mismatch")
     ErrSQLNoRows             = errors.New("sql: no rows in result set")
 )
